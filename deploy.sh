@@ -26,6 +26,7 @@
 #   ./deploy.sh --help
 #
 # Override defaults via env, e.g.:
+#   sudo PUBLIC_HOST=15.235.234.216 ./deploy.sh   # server: bake public IP into the frontend + CORS
 #   BACKEND_PORT=8081 FRONTEND_PORT=3100 PUBLIC_API_URL=https://api.example.com/api ./deploy.sh
 #   DATABASE_URL=postgres://user:pass@managed-host:5432/db ./deploy.sh   # skips local DB creation
 set -euo pipefail
@@ -87,9 +88,16 @@ FRONTEND_PORT="${FRONTEND_PORT:-3100}"  # 3100, not 3000 — another app owns 30
 DATABASE_URL="${DATABASE_URL:-postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}}"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
 
-PUBLIC_API_URL="${PUBLIC_API_URL:-http://localhost:${BACKEND_PORT}/api}"
-CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:${FRONTEND_PORT}}"
-PORTAL_BASE_URL="${PORTAL_BASE_URL:-http://localhost:${FRONTEND_PORT}}"
+# PUBLIC_HOST is the address browsers use to reach this server (its public IP or
+# a domain). It drives the API URL baked into the frontend, the backend CORS
+# allow-list, and the billing portal base. Default 'localhost' for local dev;
+# on a server set e.g. PUBLIC_HOST=15.235.234.216 (or a DNS name).
+PUBLIC_HOST="${PUBLIC_HOST:-localhost}"
+PUBLIC_API_URL="${PUBLIC_API_URL:-http://${PUBLIC_HOST}:${BACKEND_PORT}/api}"
+# Allow the public origin AND localhost (the browser may hit either). Backend
+# splits CORS_ORIGINS on commas.
+CORS_ORIGINS="${CORS_ORIGINS:-http://${PUBLIC_HOST}:${FRONTEND_PORT},http://localhost:${FRONTEND_PORT}}"
+PORTAL_BASE_URL="${PORTAL_BASE_URL:-http://${PUBLIC_HOST}:${FRONTEND_PORT}}"
 
 # Flags
 DO_BUILD=1
@@ -289,12 +297,12 @@ reconcile_env "$BACKEND_ENV" PORTAL_BASE_URL "$PORTAL_BASE_URL"
 ok "synced CORS_ORIGINS / PORTAL_BASE_URL → frontend port ${FRONTEND_PORT}"
 
 FRONTEND_ENV="$FRONTEND_DIR/.env.local"
-if [ -f "$FRONTEND_ENV" ]; then
-  ok "frontend/.env.local exists — keeping it"
-else
-  echo "NEXT_PUBLIC_API_URL=${PUBLIC_API_URL}" > "$FRONTEND_ENV"
-  ok "generated frontend/.env.local"
-fi
+[ -f "$FRONTEND_ENV" ] || : > "$FRONTEND_ENV"
+# NEXT_PUBLIC_API_URL is BAKED INTO THE BUILD, so it must point at the public
+# host (browsers can't reach the server's localhost). Reconcile every run; the
+# rebuild below picks it up.
+reconcile_env "$FRONTEND_ENV" NEXT_PUBLIC_API_URL "$PUBLIC_API_URL"
+ok "frontend NEXT_PUBLIC_API_URL → ${PUBLIC_API_URL}"
 
 # The scrapers read INGEST_KEY/BACKEND_URL from the environment (no dotenv), so
 # pull the authoritative INGEST_KEY out of backend/.env for any scraper launch.
@@ -339,6 +347,23 @@ SCRAPER_APPS="scrape_1xbet,scrape_betwinner,scrape_megapari,scrape_1win,scrape_d
 
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; } || return 1; }
 
+# Pre-PM2 deploys started services with nohup + logs/*.pid. Those processes keep
+# holding 8081/3100 and make the PM2 backend crash-loop ("Address already in use
+# / os error 98"). Kill any such leftovers before PM2 takes over the ports.
+kill_legacy_nohup() {
+  local killed=0 f pid
+  for f in "$LOG_DIR"/*.pid; do
+    [ -e "$f" ] || continue
+    pid="$(cat "$f" 2>/dev/null)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true; sleep 1; kill -9 "$pid" 2>/dev/null || true
+      killed=1
+    fi
+    rm -f "$f"
+  done
+  [ "$killed" = 1 ] && ok "killed leftover nohup processes (freed the ports for PM2)"
+}
+
 wait_health() { # poll the backend until /api/health answers (migrations + admin seed run on boot)
   printf "  waiting for /api/health "
   for _ in $(seq 1 60); do
@@ -358,6 +383,7 @@ ensure_pm2() {
 }
 
 start_with_pm2() {
+  kill_legacy_nohup
   # Pass ports + the real INGEST_KEY through so ecosystem.config.cjs picks them up.
   export BACKEND_PORT FRONTEND_PORT BACKEND_URL="http://localhost:${BACKEND_PORT}" INGEST_KEY
   local only="backend,frontend"
