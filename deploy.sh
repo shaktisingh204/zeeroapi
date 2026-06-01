@@ -322,10 +322,51 @@ else
 fi
 
 # ============================================================================
-# 5. Start services
+# 5. Start services  (PM2 keeps everything alive in the background)
 # ============================================================================
+ECOSYSTEM="$REPO_ROOT/ecosystem.config.cjs"
+SCRAPER_APPS="scrape_1xbet,scrape_betwinner,scrape_megapari,scrape_1win,scrape_d247,scrape_bcgame"
+
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && { exec 3>&- 3<&-; return 0; } || return 1; }
 
+wait_health() { # poll the backend until /api/health answers (migrations + admin seed run on boot)
+  printf "  waiting for /api/health "
+  for _ in $(seq 1 60); do
+    if curl -fsS -m 2 "http://localhost:${BACKEND_PORT}/api/health" >/dev/null 2>&1; then
+      printf "ready\n"; return 0
+    fi
+    printf "."; sleep 1
+  done
+  printf "timeout\n"; return 1
+}
+
+ensure_pm2() {
+  have pm2 && return 0
+  say "PM2 not found — installing globally (npm i -g pm2)"
+  npm install -g pm2 >/dev/null 2>&1 && { ok "pm2 installed"; return 0; } \
+    || { warn "could not install pm2 — falling back to nohup"; return 1; }
+}
+
+start_with_pm2() {
+  # Pass ports + the real INGEST_KEY through so ecosystem.config.cjs picks them up.
+  export BACKEND_PORT FRONTEND_PORT BACKEND_URL="http://localhost:${BACKEND_PORT}" INGEST_KEY
+  local only="backend,frontend"
+  [ "$WITH_SCRAPERS" = 1 ] && only="$only,$SCRAPER_APPS"
+  say "Starting stack under PM2 ($only)"
+  # startOrReload = start if new, zero-downtime reload if already registered
+  # (picks up the freshly-built binary/bundle and the latest env on every run).
+  pm2 startOrReload "$ECOSYSTEM" --only "$only" --update-env 2>/dev/null \
+    || pm2 start "$ECOSYSTEM" --only "$only" --update-env
+  pm2 save >/dev/null 2>&1 || true
+  ok "pm2 apps online: $only"
+  wait_health || warn "backend health check timed out — inspect with: pm2 logs backend"
+  [ "$WITH_SCRAPERS" != 1 ] && warn "scrapers not started — re-run with --with-scrapers (melbet runs via the backend)"
+  if ! pm2 startup 2>/dev/null | grep -q "already"; then
+    warn "to survive reboots run once:  pm2 startup   (then paste the command it prints)"
+  fi
+}
+
+# --- nohup fallback launcher (used only if PM2 is genuinely unavailable) -----
 start_bg() { # name, logfile, working-dir, command...
   local name="$1" log="$2" wd="$3"; shift 3
   local pidfile="$LOG_DIR/$name.pid"
@@ -336,25 +377,13 @@ start_bg() { # name, logfile, working-dir, command...
   ok "$name started (pid $(cat "$pidfile")) → ${log#$REPO_ROOT/}"
 }
 
-if [ "$DO_START" = 1 ]; then
-  # Redis (best effort, optional)
-  if have redis-server && ! port_busy 6379; then
-    redis-server --daemonize yes >/dev/null 2>&1 && ok "redis started" || warn "could not start redis"
-  fi
-
+start_with_nohup() {
   say "Starting backend (port $BACKEND_PORT)"
   if port_busy "$BACKEND_PORT"; then
     warn "port $BACKEND_PORT already in use — assuming backend is up"
   else
     start_bg backend "$LOG_DIR/backend.log" "$BACKEND_DIR" "$BACKEND_DIR/target/release/melbet-saas-backend"
-    # Wait for health (migrations + admin seed happen on boot)
-    printf "  waiting for /api/health "
-    for _ in $(seq 1 60); do
-      if curl -fsS -m 2 "http://localhost:${BACKEND_PORT}/api/health" >/dev/null 2>&1; then
-        printf "ready\n"; break
-      fi
-      printf "."; sleep 1
-    done
+    wait_health || true
   fi
 
   say "Starting frontend (port $FRONTEND_PORT)"
@@ -375,6 +404,20 @@ if [ "$DO_START" = 1 ]; then
     start_bg scrape_d247      "$LOG_DIR/scrape_d247.log"      "$SCRAPER_DIR" "$PY" scrape_d247.py      --loop 150
     start_bg scrape_bcgame    "$LOG_DIR/scrape_bcgame.log"    "$SCRAPER_DIR" "$PY" scrape_bcgame.py    --loop 30
     warn "melbet is auto-supervised by the backend (toggle page_sync_enabled in the admin Settings tab)"
+  fi
+}
+
+USED_PM2=0
+if [ "$DO_START" = 1 ]; then
+  # Redis (best effort, optional) — needed in both modes
+  if have redis-server && ! port_busy 6379; then
+    redis-server --daemonize yes >/dev/null 2>&1 && ok "redis started" || warn "could not start redis"
+  fi
+
+  if [ "${NO_PM2:-0}" != 1 ] && ensure_pm2; then
+    start_with_pm2; USED_PM2=1
+  else
+    start_with_nohup
   fi
 fi
 
