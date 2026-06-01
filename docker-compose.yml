@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: melbet
+      POSTGRES_PASSWORD: melbet
+      POSTGRES_DB: melbet
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U melbet"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://melbet:melbet@db:5432/melbet
+      JWT_SECRET: change-me-to-a-long-random-secret-string-please
+      MELBET_BASE_URL: https://india.melbet.com
+      MELBET_LANG: en
+      MELBET_PARTNER: "8"
+      CORS_ORIGINS: http://localhost:3000
+      RUST_LOG: info,melbet_saas_backend=debug
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8080/api
+    ports:
+      - "3000:3000"
+
+volumes:
+  pgdata:

@@ -1,232 +1,215 @@
-# Melbet SaaS — Sports / Odds / Live-Score Scraper & Admin Dashboard
+# ZeroApi — Multi-Provider Sports Odds & Live-Score Data API
 
-A full-stack SaaS platform that scrapes **sports, matches, odds and live scores** from
-the melbet (1xbet-family) public line/live feeds, stores them in PostgreSQL, and exposes
-them through a Rust API and a wide admin dashboard.
+ZeroApi scrapes **sports, leagues, matches, live scores and odds** from multiple
+bookmakers/exchanges, normalizes them into one schema, and serves them through a
+**provider-scoped public REST API** with API-key auth, rate limits, monthly quotas,
+usage analytics, billing, and auto-derived results. It ships with a developer
+**portal** (`/portal`) and an operator **admin console** (`/app`).
+
+**Providers:** `melbet` · `1xbet` · `betwinner` · `megapari` (1xbet-family SPAs, real-Chrome
+Playwright DOM) · `diamondexch` / d247 (Playwright, demo-login) · `bcgame` (BetBy/sptpub JSON
+API) · `1win` (top-parser JSON feed, no browser). More can be added.
 
 ```
-┌──────────────┐     scrape (JSON feeds)     ┌──────────────────────┐
-│ india.melbet │ ◀────────────────────────── │  Rust backend (axum) │
-└──────────────┘                             │  • scheduler          │
-                                             │  • REST API + JWT     │
-                                             │  • PostgreSQL (sqlx)  │
-                                             └──────────┬───────────┘
-                                                        │ /api (JSON)
-                                             ┌──────────▼───────────┐
-                                             │  Next.js dashboard    │
-                                             │  overview · live ·    │
-                                             │  matches · odds ·     │
-                                             │  sports · jobs ·      │
-                                             │  settings · users     │
-                                             └───────────────────────┘
+   bookmakers / exchanges
+   ┌─────────┬───────────┬──────────┐
+   │ melbet  │  d247     │ bc.game  │
+   └────┬────┴─────┬─────┴────┬─────┘
+   Playwright   Playwright   httpx (BetBy JSON)
+        │           │           │   scrapers POST → /api/ingest/snapshot (X-Ingest-Key)
+        └───────────┴───────────┴──────────────┐
+                                                ▼
+                          ┌─────────────────────────────────┐
+                          │  Rust backend (axum, port 8081)  │
+                          │  • Postgres 16 (sqlx)            │
+                          │  • Redis (rate-limit/quota/cache)│
+                          │  • public API  /api/v1/*         │
+                          │  • portal API  /api/portal/*     │
+                          │  • admin API   /api/admin/*      │
+                          │  • auto-result settler           │
+                          └───────────────┬─────────────────┘
+                                          │ JSON
+                          ┌───────────────▼─────────────────┐
+                          │  Next.js 16 frontend (port 3000) │
+                          │  /  landing · /docs · /status    │
+                          │  /portal  developer portal       │
+                          │  /app     admin console          │
+                          └──────────────────────────────────┘
 ```
 
-> ⚖️ **Legal note:** these provider feed endpoints are undocumented and scraping may
-> conflict with the site's Terms of Service and with local gambling-data regulations.
-> The scraper is rate-limited and the target/partner/language are configurable. Make
-> sure you are authorized to collect and use this data in your jurisdiction.
+> ⚖️ **Legal note:** the provider endpoints are undocumented; scraping may conflict
+> with their Terms of Service and with local gambling-data regulations. Scrapers are
+> rate-limited and configurable. Ensure you are authorized to collect and use this
+> data in your jurisdiction.
 
 ---
 
 ## Tech stack
 
-| Layer      | Choice                                                            |
-|------------|-------------------------------------------------------------------|
-| Backend    | Rust · axum · tokio · sqlx (PostgreSQL) · reqwest · JWT (argon2)   |
-| Scraper    | reqwest + tolerant `serde_json` parser, background tokio scheduler |
-| Frontend   | Next.js 16 (App Router) · TypeScript · Tailwind · Recharts        |
-| Infra      | docker-compose · PostgreSQL 16                                     |
+| Layer     | Choice                                                                 |
+|-----------|------------------------------------------------------------------------|
+| Backend   | Rust · axum · tokio · sqlx (Postgres) · reqwest · Redis · JWT (argon2)  |
+| Scrapers  | Python · Playwright (real Chrome) · httpx                              |
+| Frontend  | Next.js 16 (App Router) · TypeScript · Tailwind · Recharts             |
+| Data      | PostgreSQL 16 · Redis                                                   |
 
 ---
 
-## Quick start (Docker — everything at once)
+## Prerequisites
 
-```bash
-cp backend/.env.example backend/.env        # optional, compose sets its own env
-docker compose up --build
-```
+- **Rust** (stable) + Cargo
+- **Node.js 20+** and npm
+- **Python 3.10+**
+- **PostgreSQL 16** (running locally)
+- **Redis** (optional but recommended — rate-limit, quota, usage counters)
+- **Google Chrome** (the melbet & d247 scrapers drive real Chrome via Playwright)
 
-- API → http://localhost:8080/api/health
-- Dashboard → http://localhost:3000
-- Login with the seeded admin: **admin@melbet-saas.local / admin12345**
+Default local ports: **backend 8081**, **frontend 3000**, **Postgres 5432**, **Redis 6379**.
+(8081 not 8080 — VLC commonly squats 8080.)
 
 ---
 
-## Local development
-
-### 1. Database
+## 1. Database & Redis
 
 ```bash
-docker compose up -d db
-# or use your own Postgres and set DATABASE_URL accordingly
+# Postgres 16 — create role + db, both named "melbet"
+createuser melbet --createdb 2>/dev/null || true
+psql postgres -c "ALTER USER melbet WITH PASSWORD 'melbet';"
+createdb -O melbet melbet
+
+# Redis
+redis-server --daemonize yes
 ```
 
-### 2. Backend
+Migrations run automatically on backend boot (`sqlx::migrate!`) — no manual step.
+
+---
+
+## 2. Backend (Rust API, port 8081)
 
 ```bash
 cd backend
-cp .env.example .env          # edit DATABASE_URL / JWT_SECRET / MELBET_* as needed
-cargo run                     # runs migrations + seeds admin on first boot
+# create .env with the keys below
+cargo run     # runs migrations, seeds an admin, serves /api, starts the melbet
+              # page-scraper supervisor + the auto-result settler
 ```
 
-The server listens on `http://0.0.0.0:8080`. The background scheduler starts two loops
-(prematch + live) immediately unless `SCRAPE_ENABLED=false`.
+**`backend/.env`:**
 
-### 3. Frontend
+```ini
+BIND_ADDR=0.0.0.0:8081
+DATABASE_URL=postgres://melbet:melbet@localhost:5432/melbet
+REDIS_URL=redis://127.0.0.1:6379
+INGEST_KEY=dev-ingest-key                 # scrapers authenticate with this
+JWT_SECRET=change-me
+BOOTSTRAP_ADMIN_EMAIL=admin@melbet-saas.local
+BOOTSTRAP_ADMIN_PASSWORD=admin12345
+# Stripe (optional — billing endpoints 404 until set)
+STRIPE_SECRET_KEY=
+STRIPE_WEBHOOK_SECRET=
+PORTAL_BASE_URL=http://localhost:3000
+# melbet scraper supervision
+PAGE_SCRAPER_PYTHON=../scraper-py/.venv/bin/python
+PAGE_SCRAPER_SCRIPT=../scraper-py/realtime.py
+CORS_ORIGINS=http://localhost:3000
+```
+
+The backend **supervises the melbet scraper** automatically (toggle on the admin
+Settings tab via `page_sync_enabled`). The d247 and bc.game scrapers run standalone
+(step 4).
+
+---
+
+## 3. Frontend (Next.js, port 3000)
 
 ```bash
 cd frontend
-cp .env.local.example .env.local
 npm install
-npm run dev                   # http://localhost:3000
+echo 'NEXT_PUBLIC_API_URL=http://localhost:8081/api' > .env.local
+npm run dev          # http://localhost:3000
 ```
+
+- **Landing:** `/`  ·  **API docs:** `/docs`  ·  **Status:** `/status`  ·  **Changelog:** `/changelog`
+- **Developer portal:** `/portal` (sign up `/signup` · sign in `/login`)
+- **Admin console:** `/app` (sign in at `/login`; one login routes admins → `/app`,
+  customers → `/portal`). Seeded admin: `admin@melbet-saas.local` / `admin12345`.
 
 ---
 
-## API overview
-
-All `/api/admin/*` routes and `/auth/me` require an `Authorization: Bearer <jwt>` header.
-
-| Method | Path                          | Role    | Description                          |
-|--------|-------------------------------|---------|--------------------------------------|
-| POST   | `/api/auth/login`             | public  | Email/password → JWT                 |
-| GET    | `/api/auth/me`                | any     | Current user                         |
-| GET    | `/api/sports`                 | any     | Sports catalog                       |
-| PATCH  | `/api/sports/:id/toggle`      | editor  | Enable/disable a sport               |
-| GET    | `/api/matches`                | any     | Filter by status/sport/league/search |
-| GET    | `/api/matches/:id`            | any     | Match detail + odds                  |
-| GET    | `/api/matches/:id/odds`       | any     | Odds for a match                     |
-| GET    | `/api/odds/:match_id/history` | any     | Line-movement history                |
-| GET    | `/api/live`                   | any     | All live matches                     |
-| GET    | `/api/admin/stats`            | any     | Dashboard KPIs                       |
-| GET    | `/api/admin/logs`             | any     | Scrape run history                   |
-| POST   | `/api/admin/scrape/:job`      | editor  | Trigger `sports`/`prematch`/`live`   |
-| GET    | `/api/admin/settings`         | any     | Runtime settings                     |
-| PUT    | `/api/admin/settings/:key`    | admin   | Update a setting                     |
-| GET    | `/api/admin/users`            | admin   | List users                           |
-| POST   | `/api/admin/users`            | admin   | Create user                          |
-| DELETE | `/api/admin/users/:id`        | admin   | Delete user                          |
-
-### Example
-
-```bash
-TOKEN=$(curl -s localhost:8080/api/auth/login \
-  -H 'content-type: application/json' \
-  -d '{"email":"admin@melbet-saas.local","password":"admin12345"}' | jq -r .token)
-
-curl -s localhost:8080/api/admin/stats -H "Authorization: Bearer $TOKEN" | jq
-curl -s -X POST localhost:8080/api/admin/scrape/live -H "Authorization: Bearer $TOKEN" | jq
-```
-
----
-
-## How the scraper works
-
-`backend/src/scraper/melbet.rs` targets the provider's `LineFeed` / `LiveFeed` JSON
-endpoints (e.g. `GetSportsShortZip`, `Get1x2_VZip`, `GetGameZip`). The parser is
-**tolerant**: it walks `serde_json::Value`, skips anything it can't understand, and never
-fails a whole pass for one bad record.
-
-### All markets, every line
-
-Each odd carries a market group (`G`) and outcome type (`T`). `collect_odds` captures
-**every** line a game exposes, from all three places the provider hides them:
-
-| Source       | Where it lives        | What it holds                                  |
-|--------------|-----------------------|------------------------------------------------|
-| `E`          | list & game feeds     | the headline line of each market group         |
-| `AE[].ME`    | list feeds            | **every** line within each group (all totals…) |
-| `GE[].E`     | `GetGameZip` per game | the **complete** market tree (props, periods…) |
-
-Lines are deduped by `(group, type, param)` and persisted with their **raw** `group_id`
-and `type_code`, so nothing is ever lost — even markets we don't have a human name for
-yet are stored as `Group <id>` / `T<code>` and can be relabelled later by extending
-`market_name` / `classify`. The 1x2 / Handicap / Total groups were verified live against
-real odds (covered by unit tests in `melbet.rs` using a captured fixture).
-
-The list (`live`/`prematch`) jobs already capture every group the feed returns
-(~24 lines/match across 16+ groups). The **`full`** job calls `GetGameZip` per match to
-pull the entire market tree (hundreds of lines incl. player props & period bets); it is
-rate-limited and capped per pass, and is exposed as the **"All markets"** button on the
-Scrape Jobs page (`POST /api/admin/scrape/full`).
-
-## Two scraping engines
-
-The project has **two** scrapers that write to the same tables (the dashboard reads
-both; rows are tagged with a `source` column):
-
-| Engine | How | Market names | Anti-bot | Best for |
-|--------|-----|--------------|----------|----------|
-| **Feed** (Rust) | JSON LineFeed/LiveFeed endpoints | numeric codes (`G`/`T`) mapped where known, else `Group N` | can be throttled | max breadth/speed, raw line history |
-| **Page** (Python) | real Chrome renders the SPA → reads the DOM | **real names** (`Match Result/W1`, `Total/Over`…) resolved by the site itself | bypassed (real browser) | clean, human-readable data |
-
-### Page scraper (recommended for readable markets)
-
-melbet's HTML is a JS SPA behind an anti-bot layer, so its odds aren't in the raw HTML
-and the feeds expose only numeric codes. The Python scraper (`scraper-py/`) renders the
-pages in **real Chrome via Playwright**, which both passes the anti-bot check and lets
-the page resolve the codes into names. It then POSTs structured matches to
-`POST /api/ingest/snapshot` (auth: `X-Ingest-Key`).
+## 4. Scrapers (Python / Playwright)
 
 ```bash
 cd scraper-py
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python scrape.py --loop 30      # continuous; see scraper-py/README.md
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/playwright install chrome
 ```
 
-```
-Chrome (Playwright) → scrape.py → POST /api/ingest/snapshot → Postgres → dashboard
-```
+| Provider | Command | Notes |
+|----------|---------|-------|
+| **melbet** | *(auto)* | Supervised by the backend. Override sports with `MELBET_LINE_SPORTS`. |
+| **1xbet** | `.venv/bin/python scrape_1xbet.py --loop 30` | 1xbet-family SPA, real Chrome. Rotating mirrors — override entry domain with `ONEXBET_BASE_URL` (default `https://1x001.com`). |
+| **betwinner** | `.venv/bin/python scrape_betwinner.py --loop 30` | 1xbet-family SPA, real Chrome. `BETWINNER_BASE_URL` (default `https://betwinner1.com`; fallback `https://betwinner.cm`). |
+| **megapari** | `.venv/bin/python scrape_megapari.py --loop 30` | 1xbet-family SPA, real Chrome. `MEGAPARI_BASE_URL` (default `https://megapari.com`). |
+| **1win** | `.venv/bin/python scrape_1win.py --loop 20` | Pure JSON (no browser) via top-parser `lp-feed` (live only). `ONEWIN_BASE_URL` / `ONEWIN_FEED` / `ONEWIN_FEED_LIMIT` overridable. |
+| **diamondexch (d247)** | `.venv/bin/python scrape_d247.py --loop 150` | Real Chrome + demo login; `D247_DETAIL_CAP=15` controls live-match market enrichment. |
+| **bc.game** | `.venv/bin/python scrape_bcgame.py --loop 30` | Pure JSON (no browser). `BCGAME_BRAND` / `BCGAME_SPTPUB_API` overridable. |
 
-If the provider changes its API shape, you only need to adjust:
-- the endpoint builders (`sports_url`, `prematch_url`, `live_url`), and
-- the field names in `parse_game` / `parse_score` / `parse_odds`.
-
-Everything downstream (DB, API, dashboard) stays the same.
-
-### Tuning
-
-| Env var                        | Default | Meaning                              |
-|--------------------------------|---------|--------------------------------------|
-| `MELBET_BASE_URL`              | india.melbet.com | Target origin               |
-| `MELBET_PARTNER`               | 8       | Partner id used by the feeds         |
-| `SCRAPE_PREMATCH_INTERVAL_SECS`| 300     | Prematch refresh cadence             |
-| `SCRAPE_LIVE_INTERVAL_SECS`    | 20      | Live refresh cadence                 |
-| `SCRAPE_REQUEST_DELAY_MS`      | 400     | Polite delay between HTTP requests   |
-| `SCRAPE_ENABLED`               | true    | Master switch for background loops   |
-
-`scrape_enabled` / interval settings can also be changed at runtime from the
-**Settings** page in the dashboard (the scheduler reads the `settings` table each pass).
+All scrapers POST to `POST /api/ingest/snapshot` with header `X-Ingest-Key: $INGEST_KEY`,
+tagging every row with its `provider`. New providers start **disabled** — enable them
+on the admin **Providers** tab.
 
 ---
 
-## Project layout
+## 5. Use the API
+
+1. Sign up at `/signup` → developer portal `/portal`.
+2. **Create an API key** (Overview tab) → "Test now" opens the Playground prefilled.
+3. Call the provider-scoped API:
+
+```bash
+# provider in the path (canonical)
+curl -H "X-API-Key: YOUR_KEY" "http://localhost:8081/api/v1/melbet/live"
+
+# or provider as a query param (equivalent)
+curl -H "X-API-Key: YOUR_KEY" "http://localhost:8081/api/v1/live?provider=melbet"
+```
+
+Full reference with copy-paste examples: **http://localhost:3000/docs**.
+
+---
+
+## Auto-results
+
+A backend settler marks a live match `finished` once it stops updating (it left the
+live feed = it ended) and derives the winner (`W1`/`Draw`/`W2`) from the last-known
+score. Tunable on the admin **Settings** tab (`result_enabled`, `result_stale_minutes`).
+Surfaced at `GET /api/v1/{provider}/results` and the admin Matches "Winner" column.
+
+---
+
+## Project structure
 
 ```
-backend/
-  migrations/0001_init.sql      # schema (users, sports, leagues, matches, odds, logs…)
-  src/
-    main.rs                     # axum bootstrap, CORS, scheduler spawn
-    config.rs  db.rs  error.rs  models.rs  auth.rs  state.rs
-    scraper/{melbet.rs,types.rs}
-    routes/{auth,sports,matches,odds,live,admin}.rs
-    jobs/{mod.rs,scheduler.rs}
-frontend/
-  src/
-    lib/{api.ts,types.ts}
-    components/{Shell.tsx,ui.tsx}
-    app/
-      login/page.tsx
-      (dashboard)/{layout,page}.tsx
-      (dashboard)/{live,matches,sports,jobs,settings,users}/...
-docker-compose.yml
+backend/          Rust API, scheduler, scraper supervisor, migrations/
+  src/routes/     v1 (public) · portal · admin · ingest · auth · status
+  src/jobs/       scheduler: usage rollup + auto-result settler
+scraper-py/       realtime.py (melbet) · scrape_1xbet.py · scrape_betwinner.py
+                  scrape_megapari.py · scrape_1win.py · scrape_d247.py · scrape_bcgame.py
+frontend/         Next.js app
+  src/app/        / landing · /docs · /status · /changelog · /portal · /app
+  src/components/ ui.tsx (DataTable, Card, Badge, …) · Shell · AdminInsights
+  src/lib/        config · providers · theme · hooks · api · portal
 ```
 
 ---
 
-## Security notes
+## Common gotchas
 
-- Change `JWT_SECRET` and the bootstrap admin password before any real deployment.
-- Roles: `admin` (full), `editor` (trigger scrapes, toggle sports), `viewer` (read-only).
-- Passwords are hashed with argon2; JWTs expire after `JWT_EXPIRY_HOURS`.
-# zeeroapi
+- **Backend is on 8081, not 8080.** Frontend + scrapers point at `:8081`.
+- **melbet anti-bot:** request bursts get IP-throttled (connection timeouts). The
+  scraper warms tabs gently; if blocked, give it a cooldown.
+- **Redis optional:** the app runs without it, but rate-limit/quota/usage analytics
+  need it.
+- **Providers disabled by default:** enable them on the admin Providers tab before
+  they appear in the public API.

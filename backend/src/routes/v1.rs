@@ -1,0 +1,486 @@
+//! ZeroApi public API v1 — provider-scoped. Every data endpoint lives under
+//! `/api/v1/{provider}/...`; each provider exposes only the endpoints in its
+//! `capabilities`, and returns its own scraped data. Auth is via the
+//! `ApiClient` extractor (X-API-Key) which also enforces plan rate-limit/quota.
+//! `/openapi.json` and `/docs` are public.
+
+use crate::api_keys::ApiClient;
+use crate::error::{AppError, AppResult};
+use crate::models::{MatchView, Odd, Plan, Provider, Sport};
+use crate::state::AppState;
+use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
+use axum::response::Html;
+use axum::routing::get;
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/openapi.json", get(openapi))
+        .route("/docs", get(docs))
+        .route("/providers", get(providers))
+        // Canonical: provider in the path — /api/v1/{provider}/live
+        .route("/:provider/sports", get(sports))
+        .route("/:provider/leagues", get(leagues))
+        .route("/:provider/matches", get(matches))
+        .route("/:provider/matches/:id", get(match_detail))
+        .route("/:provider/live", get(live))
+        .route("/:provider/results", get(results))
+        .route("/:provider/odds/:match_id", get(match_odds))
+        // Forgiving alternative: provider as a query param — /api/v1/live?provider=melbet
+        .route("/sports", get(sports_q))
+        .route("/leagues", get(leagues_q))
+        .route("/matches", get(matches_q))
+        .route("/matches/:id", get(match_detail_q))
+        .route("/live", get(live_q))
+        .route("/results", get(results_q))
+        .route("/odds/:match_id", get(match_odds_q))
+        // Helpful JSON for anything else under /api/v1/* (instead of an empty 404).
+        .fallback(v1_fallback)
+}
+
+/// Query form of the provider selector (`?provider=...`).
+#[derive(Debug, Deserialize)]
+pub struct ProviderQuery {
+    pub provider: Option<String>,
+}
+
+fn need_provider(p: Option<String>) -> AppResult<String> {
+    p.filter(|s| !s.is_empty()).ok_or_else(|| {
+        AppError::BadRequest(
+            "missing provider — pass ?provider=<slug> or use /api/v1/{provider}/...".into(),
+        )
+    })
+}
+
+async fn v1_fallback() -> AppResult<Json<Value>> {
+    Err(AppError::BadRequest(
+        "unknown endpoint. Use /api/v1/{provider}/{sports|leagues|matches|matches/:id|live|odds/:id} \
+         or the query form e.g. /api/v1/live?provider=melbet. See /api/v1/docs."
+            .into(),
+    ))
+}
+
+fn rate_headers(c: &ApiClient) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    if let Ok(v) = c.plan.rate_limit_per_min.to_string().parse() {
+        h.insert("x-ratelimit-limit", v);
+    }
+    if let Ok(v) = c.remaining.to_string().parse() {
+        h.insert("x-ratelimit-remaining", v);
+    }
+    h
+}
+
+/// Ensure the provider exists, is active, and exposes `resource`.
+async fn require_capability(state: &AppState, provider: &str, resource: &str) -> AppResult<()> {
+    let row: Option<(bool, Value)> =
+        sqlx::query_as("SELECT is_active, capabilities FROM providers WHERE slug = $1")
+            .bind(provider)
+            .fetch_optional(&state.pool)
+            .await?;
+    match row {
+        None => Err(AppError::NotFound),
+        Some((false, _)) => Err(AppError::BadRequest(format!(
+            "provider '{provider}' is not active"
+        ))),
+        Some((true, caps)) => {
+            let has = caps
+                .as_array()
+                .map(|a| a.iter().any(|c| c.as_str() == Some(resource)))
+                .unwrap_or(false);
+            if has {
+                Ok(())
+            } else {
+                Err(AppError::BadRequest(format!(
+                    "endpoint '{resource}' is not available for provider '{provider}'"
+                )))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    pub provider: Option<String>,
+    pub sport_id: Option<i64>,
+    pub league_id: Option<i64>,
+    pub status: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+async fn providers(
+    State(state): State<AppState>,
+    client: ApiClient,
+) -> AppResult<(HeaderMap, Json<Vec<Provider>>)> {
+    let rows: Vec<Provider> =
+        sqlx::query_as("SELECT * FROM providers WHERE is_active ORDER BY name")
+            .fetch_all(&state.pool)
+            .await?;
+    Ok((rate_headers(&client), Json(rows)))
+}
+
+// ---- sports ----
+async fn sports_core(state: &AppState, client: &ApiClient, provider: &str)
+    -> AppResult<(HeaderMap, Json<Vec<Sport>>)> {
+    require_capability(state, provider, "sports").await?;
+    let rows: Vec<Sport> = sqlx::query_as(
+        "SELECT * FROM sports WHERE provider = $1 ORDER BY match_count DESC, name ASC LIMIT 500",
+    )
+    .bind(provider)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok((rate_headers(client), Json(rows)))
+}
+async fn sports(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
+    -> AppResult<(HeaderMap, Json<Vec<Sport>>)> {
+    sports_core(&state, &client, &provider).await
+}
+async fn sports_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<Sport>>)> {
+    sports_core(&state, &client, &need_provider(q.provider)?).await
+}
+
+// ---- leagues ----
+async fn leagues_core(state: &AppState, client: &ApiClient, provider: &str, sport_id: Option<i64>)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    require_capability(state, provider, "leagues").await?;
+    let rows: Vec<(i64, i64, String, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT l.id, l.sport_id, s.name AS sport_name, l.name, l.country, COUNT(m.id) AS match_count
+         FROM leagues l JOIN sports s ON s.id = l.sport_id
+         LEFT JOIN matches m ON m.league_id = l.id
+         WHERE l.provider = $1 AND ($2::bigint IS NULL OR l.sport_id = $2)
+         GROUP BY l.id, s.name ORDER BY match_count DESC, l.name ASC LIMIT 500",
+    )
+    .bind(provider)
+    .bind(sport_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let out = rows
+        .into_iter()
+        .map(|(id, sport_id, sport_name, name, country, match_count)| {
+            json!({ "id": id, "sport_id": sport_id, "sport_name": sport_name,
+                    "name": name, "country": country, "match_count": match_count })
+        })
+        .collect();
+    Ok((rate_headers(client), Json(out)))
+}
+async fn leagues(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>, Query(q): Query<ListQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    leagues_core(&state, &client, &provider, q.sport_id).await
+}
+async fn leagues_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ListQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    leagues_core(&state, &client, &need_provider(q.provider)?, q.sport_id).await
+}
+
+const MATCH_SELECT: &str = "
+    SELECT m.id, m.provider, m.sport_id, s.name AS sport_name, m.league_id, l.name AS league_name,
+           m.home_team, m.away_team, m.home_logo, m.away_logo, m.start_time, m.status,
+           m.home_score, m.away_score, m.period, m.match_time, m.result, m.finished_at, m.updated_at
+    FROM matches m JOIN sports s ON s.id = m.sport_id LEFT JOIN leagues l ON l.id = m.league_id";
+
+// ---- matches (list) ----
+async fn matches_core(state: &AppState, client: &ApiClient, provider: &str, q: ListQuery)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    require_capability(state, provider, "matches").await?;
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let search = q.search.map(|s| format!("%{}%", s.to_lowercase()));
+    let sql = format!(
+        "{MATCH_SELECT}
+         WHERE m.provider = $1
+           AND ($2::text IS NULL OR m.status = $2)
+           AND ($3::bigint IS NULL OR m.sport_id = $3)
+           AND ($4::bigint IS NULL OR m.league_id = $4)
+           AND ($5::text IS NULL OR lower(m.home_team) LIKE $5 OR lower(m.away_team) LIKE $5)
+         ORDER BY (m.status = 'live') DESC, m.start_time ASC NULLS LAST
+         LIMIT $6 OFFSET $7"
+    );
+    let rows: Vec<MatchView> = sqlx::query_as(&sql)
+        .bind(provider)
+        .bind(&q.status)
+        .bind(q.sport_id)
+        .bind(q.league_id)
+        .bind(search)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.pool)
+        .await?;
+    Ok((rate_headers(client), Json(rows)))
+}
+async fn matches(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>, Query(q): Query<ListQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    matches_core(&state, &client, &provider, q).await
+}
+async fn matches_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ListQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    let provider = need_provider(q.provider.clone())?;
+    matches_core(&state, &client, &provider, q).await
+}
+
+// ---- match detail ----
+async fn match_detail_core(state: &AppState, client: &ApiClient, provider: &str, id: i64)
+    -> AppResult<(HeaderMap, Json<Value>)> {
+    require_capability(state, provider, "matches").await?;
+    let sql = format!("{MATCH_SELECT} WHERE m.provider = $1 AND m.id = $2");
+    let m: Option<MatchView> = sqlx::query_as(&sql)
+        .bind(provider)
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let m = m.ok_or(AppError::NotFound)?;
+    let odds: Vec<Odd> =
+        sqlx::query_as("SELECT * FROM odds WHERE match_id = $1 ORDER BY market, outcome")
+            .bind(id)
+            .fetch_all(&state.pool)
+            .await?;
+    let mut body = serde_json::to_value(&m).unwrap_or_else(|_| json!({}));
+    body["odds"] = serde_json::to_value(odds).unwrap_or_else(|_| json!([]));
+    Ok((rate_headers(client), Json(body)))
+}
+async fn match_detail(State(state): State<AppState>, client: ApiClient, Path((provider, id)): Path<(String, i64)>)
+    -> AppResult<(HeaderMap, Json<Value>)> {
+    match_detail_core(&state, &client, &provider, id).await
+}
+async fn match_detail_q(State(state): State<AppState>, client: ApiClient, Path(id): Path<i64>, Query(q): Query<ProviderQuery>)
+    -> AppResult<(HeaderMap, Json<Value>)> {
+    match_detail_core(&state, &client, &need_provider(q.provider)?, id).await
+}
+
+// ---- live ----
+async fn live_core(state: &AppState, client: &ApiClient, provider: &str)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    require_capability(state, provider, "live").await?;
+    let sql = format!(
+        "{MATCH_SELECT} WHERE m.provider = $1 AND m.status = 'live' ORDER BY m.updated_at DESC LIMIT 500"
+    );
+    let rows: Vec<MatchView> = sqlx::query_as(&sql)
+        .bind(provider)
+        .fetch_all(&state.pool)
+        .await?;
+    Ok((rate_headers(client), Json(rows)))
+}
+async fn live(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    live_core(&state, &client, &provider).await
+}
+async fn live_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    live_core(&state, &client, &need_provider(q.provider)?).await
+}
+
+// ---- results (finished matches with derived winners) ----
+async fn results_core(state: &AppState, client: &ApiClient, provider: &str)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    require_capability(state, provider, "matches").await?;
+    let sql = format!(
+        "{MATCH_SELECT} WHERE m.provider = $1 AND m.status = 'finished' AND m.finished_at IS NOT NULL
+         ORDER BY m.finished_at DESC LIMIT 300"
+    );
+    let rows: Vec<MatchView> = sqlx::query_as(&sql)
+        .bind(provider)
+        .fetch_all(&state.pool)
+        .await?;
+    Ok((rate_headers(client), Json(rows)))
+}
+async fn results(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    results_core(&state, &client, &provider).await
+}
+async fn results_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    results_core(&state, &client, &need_provider(q.provider)?).await
+}
+
+// ---- match odds ----
+async fn match_odds_core(state: &AppState, client: &ApiClient, provider: &str, match_id: i64)
+    -> AppResult<(HeaderMap, Json<Vec<Odd>>)> {
+    require_capability(state, provider, "odds").await?;
+    let odds: Vec<Odd> = sqlx::query_as(
+        "SELECT o.* FROM odds o JOIN matches m ON m.id = o.match_id
+         WHERE o.match_id = $1 AND m.provider = $2 ORDER BY o.market, o.outcome",
+    )
+    .bind(match_id)
+    .bind(provider)
+    .fetch_all(&state.pool)
+    .await?;
+    Ok((rate_headers(client), Json(odds)))
+}
+async fn match_odds(State(state): State<AppState>, client: ApiClient, Path((provider, match_id)): Path<(String, i64)>)
+    -> AppResult<(HeaderMap, Json<Vec<Odd>>)> {
+    match_odds_core(&state, &client, &provider, match_id).await
+}
+async fn match_odds_q(State(state): State<AppState>, client: ApiClient, Path(match_id): Path<i64>, Query(q): Query<ProviderQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<Odd>>)> {
+    match_odds_core(&state, &client, &need_provider(q.provider)?, match_id).await
+}
+
+// ---------------- OpenAPI (per-provider, with examples) ----------------
+
+async fn openapi(State(state): State<AppState>) -> Json<Value> {
+    let provs: Vec<Provider> = sqlx::query_as("SELECT * FROM providers ORDER BY is_active DESC, name")
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+    let plans: Vec<Plan> = sqlx::query_as("SELECT * FROM plans ORDER BY sort_order")
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+
+    // Example payloads shown in the docs.
+    let sport_ex = json!([{ "id": 4471626188_i64, "name": "Football", "slug": "football",
+        "match_count": 92, "logo_url": null, "provider": "melbet" }]);
+    let match_ex = json!([{ "id": 2267604396_i64, "provider": "melbet", "sport_name": "Football",
+        "league_name": "UEFA Champions League", "home_team": "Paris Saint-Germain",
+        "away_team": "Arsenal", "home_logo": "https://v3.traincdn.com/sfiles/logo_teams/12709.webp",
+        "status": "live", "home_score": 1, "away_score": 1, "match_time": "72'",
+        "updated_at": "2026-05-31T12:00:00Z" }]);
+    let odds_ex = json!([
+        { "market": "Match Result", "outcome": "W1", "value": "3.88", "provider": "melbet" },
+        { "market": "Total", "outcome": "Over", "value": "1.85", "param": "2.5", "provider": "melbet" },
+        { "market": "Double Chance", "outcome": "1X", "value": "1.30", "provider": "melbet" }
+    ]);
+    let provider_ex = json!([{ "slug": "melbet", "name": "MelBet",
+        "capabilities": ["sports","leagues","matches","live","odds","full_markets"], "is_active": true }]);
+
+    let resp = |desc: &str, example: &Value| json!({
+        "description": desc,
+        "content": { "application/json": { "example": example } }
+    });
+
+    let mut paths = serde_json::Map::new();
+    paths.insert(
+        "/providers".into(),
+        json!({"get": {"tags": ["meta"], "summary": "List active providers",
+            "responses": {"200": resp("Active providers", &provider_ex)}}}),
+    );
+
+    // Generate concrete per-provider paths so the docs show each provider's
+    // actual (different) endpoint set.
+    for p in &provs {
+        let caps: Vec<String> = p
+            .capabilities
+            .as_array()
+            .map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let tag = format!("{} ({})", p.name, if p.is_active { "active" } else { "disabled" });
+        let pv = &p.slug;
+
+        if caps.iter().any(|c| c == "sports") {
+            paths.insert(format!("/{pv}/sports"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — sports", p.name),
+                "responses": {"200": resp("Sports list", &sport_ex)}}}));
+        }
+        if caps.iter().any(|c| c == "leagues") {
+            paths.insert(format!("/{pv}/leagues"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — leagues", p.name),
+                "parameters":[{"name":"sport_id","in":"query","schema":{"type":"integer"}}],
+                "responses": {"200": resp("Leagues list",
+                    &json!([{"id":2542291,"name":"Indian Premier League","sport_name":"Cricket","country":"India","match_count":10}]))}}}));
+        }
+        if caps.iter().any(|c| c == "matches") {
+            paths.insert(format!("/{pv}/matches"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — matches", p.name),
+                "parameters":[
+                    {"name":"status","in":"query","schema":{"type":"string","enum":["live","prematch","finished"]}},
+                    {"name":"sport_id","in":"query","schema":{"type":"integer"}},
+                    {"name":"league_id","in":"query","schema":{"type":"integer"}},
+                    {"name":"search","in":"query","schema":{"type":"string"}},
+                    {"name":"limit","in":"query","schema":{"type":"integer","default":50}},
+                    {"name":"offset","in":"query","schema":{"type":"integer","default":0}}],
+                "responses": {"200": resp("Matches", &match_ex)}}}));
+            paths.insert(format!("/{pv}/matches/{{id}}"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — match detail + odds", p.name),
+                "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],
+                "responses": {"200": resp("Match with odds",
+                    &json!({"id":2267604396_i64,"home_team":"PSG","away_team":"Arsenal","status":"live","odds":odds_ex})),
+                    "404": {"description":"Not found"}}}}));
+        }
+        if caps.iter().any(|c| c == "live") {
+            paths.insert(format!("/{pv}/live"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — live matches", p.name),
+                "responses": {"200": resp("Live matches", &match_ex)}}}));
+        }
+        if caps.iter().any(|c| c == "odds") {
+            paths.insert(format!("/{pv}/odds/{{match_id}}"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — odds for a match", p.name),
+                "parameters":[{"name":"match_id","in":"path","required":true,"schema":{"type":"integer"}}],
+                "responses": {"200": resp("Odds", &odds_ex)}}}));
+        }
+    }
+
+    let plan_desc = plans.iter().map(|p| format!("{} — {}/min, {}",
+        p.name, p.rate_limit_per_min,
+        if p.monthly_quota < 0 { "unlimited".into() } else { format!("{}/mo", p.monthly_quota) }))
+        .collect::<Vec<_>>().join(" · ");
+
+    Json(json!({
+      "openapi": "3.0.3",
+      "info": {
+        "title": "ZeroApi — Sports Data API",
+        "version": "1.0.0",
+        "description": format!("Real-time sports, matches, odds & live scores across multiple bookmaker providers.\n\n**Provider-based:** every endpoint is namespaced under `/api/v1/{{provider}}/…`, and each provider exposes its own endpoint set + data.\n\n**Plans:** {plan_desc}\n\nAuthenticate with the `X-API-Key` header (get a key in your ZeroApi dashboard).")
+      },
+      "servers": [{"url": "/api/v1"}],
+      "security": [{"ApiKeyAuth": []}],
+      "components": {"securitySchemes": {"ApiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-API-Key"}}},
+      "paths": Value::Object(paths)
+    }))
+}
+
+async fn docs() -> Html<&'static str> {
+    Html(DOCS_HTML)
+}
+
+// Swagger UI themed dark to match the ZeroApi dashboard.
+const DOCS_HTML: &str = r##"<!DOCTYPE html>
+<html lang="en"><head>
+<title>ZeroApi — API Reference</title>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"/>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0e14; }
+  .topbar { background:#131722; border-bottom:1px solid #262d3d; padding:16px 24px; display:flex; align-items:center; gap:12px; }
+  .topbar .logo { width:30px;height:30px;border-radius:8px;background:#22c55e;display:flex;align-items:center;justify-content:center;color:#000;font-weight:700; }
+  .topbar h1 { color:#fff; font:600 18px/1 system-ui,sans-serif; margin:0; }
+  .topbar span { color:#8b93a7; font:13px system-ui,sans-serif; }
+  /* Swagger dark theme overrides */
+  .swagger-ui, .swagger-ui .info .title, .swagger-ui .opblock-tag,
+  .swagger-ui .opblock .opblock-summary-operation-id,
+  .swagger-ui .opblock .opblock-summary-description,
+  .swagger-ui .opblock .opblock-summary-path,
+  .swagger-ui .parameter__name, .swagger-ui table thead tr td,
+  .swagger-ui table thead tr th, .swagger-ui .response-col_status,
+  .swagger-ui .col_header, .swagger-ui label, .swagger-ui .tab li,
+  .swagger-ui .info li, .swagger-ui .info p, .swagger-ui .info table { color:#e6e9ef !important; }
+  .swagger-ui .scheme-container, .swagger-ui section.models, .swagger-ui .opblock .opblock-section-header { background:#131722 !important; box-shadow:none; border-color:#262d3d; }
+  .swagger-ui .opblock-tag { border-bottom:1px solid #262d3d; }
+  .swagger-ui .opblock { background:#131722; border:1px solid #262d3d; box-shadow:none; border-radius:10px; margin:0 0 12px; }
+  .swagger-ui .opblock .opblock-summary { border-color:#262d3d; }
+  .swagger-ui .opblock.opblock-get .opblock-summary-method { background:#22c55e; }
+  .swagger-ui .opblock.opblock-get { border-color:#22c55e44; background:#0f1f17; }
+  .swagger-ui .btn { color:#e6e9ef; border-color:#3a4358; }
+  .swagger-ui input, .swagger-ui textarea, .swagger-ui select { background:#1c2230 !important; color:#e6e9ef !important; border:1px solid #262d3d !important; }
+  .swagger-ui .highlight-code, .swagger-ui .microlight, .swagger-ui .responses-inner pre, .swagger-ui .body-param pre { background:#0b0e14 !important; }
+  .swagger-ui .markdown code, .swagger-ui .renderedMarkdown code { background:#1c2230; color:#22c55e; }
+  .swagger-ui svg { fill:#8b93a7; }
+  .swagger-ui .topbar { display:none; }
+</style>
+</head><body>
+<div class="topbar"><div class="logo">Z</div><h1>ZeroApi</h1><span>Sports Data API · provider-based · <b>v1</b> (stable)</span>
+<a href="http://localhost:3000/changelog" style="margin-left:auto;color:#22c55e;font:13px system-ui,sans-serif;text-decoration:none">Changelog ↗</a>
+<a href="http://localhost:3000/status" style="margin-left:16px;color:#8b93a7;font:13px system-ui,sans-serif;text-decoration:none">Status ↗</a></div>
+<div id="swagger"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>
+SwaggerUIBundle({ url: "/api/v1/openapi.json", dom_id: "#swagger",
+  docExpansion: "list", defaultModelsExpandDepth: -1, tryItOutEnabled: true });
+</script>
+</body></html>"##;
