@@ -13,18 +13,54 @@
 # regenerated), the DB is only created if absent, and already-listening
 # services are left alone.
 #
+# Runs the whole stack as root: if not root, it re-execs under sudo (preserving
+# the invoking user's PATH/cargo/node). Set NO_SUDO=1 to run as the current user.
+#
 # Usage:
-#   ./deploy.sh                 # full bootstrap + build + start
+#   ./deploy.sh                 # full bootstrap + build + start (elevates via sudo)
 #   ./deploy.sh --no-build      # skip dependency install / compile
 #   ./deploy.sh --no-start      # bootstrap + build only (don't launch services)
 #   ./deploy.sh --with-scrapers # also launch the standalone provider scrapers
 #   ./deploy.sh --stop          # stop services started by this script
+#   NO_SUDO=1 ./deploy.sh       # do NOT elevate; run as the current user
 #   ./deploy.sh --help
 #
 # Override defaults via env, e.g.:
-#   BACKEND_PORT=8081 FRONTEND_PORT=3000 PUBLIC_API_URL=https://api.example.com/api ./deploy.sh
+#   BACKEND_PORT=8081 FRONTEND_PORT=3100 PUBLIC_API_URL=https://api.example.com/api ./deploy.sh
 #   DATABASE_URL=postgres://user:pass@managed-host:5432/db ./deploy.sh   # skips local DB creation
 set -euo pipefail
+
+# ----------------------------------------------------------------------------
+# Privilege: run the WHOLE script as root.
+# If we're not root, re-exec under sudo (preserving the environment so the
+# invoking user's PATH / cargo / node / nvm stay visible — sudo normally resets
+# it, which would break the toolchain preflight and the build).
+#   • Set NO_SUDO=1 to skip elevation and run as the current user.
+#   • --help is exempt so you don't get a password prompt just to read usage.
+# ----------------------------------------------------------------------------
+case "${1:-}" in -h|--help) NO_SUDO=1 ;; esac
+if [ "${NO_SUDO:-0}" != 1 ] && [ "$(id -u)" -ne 0 ]; then
+  if command -v sudo >/dev/null 2>&1; then
+    printf '\033[1m==>\033[0m Elevating: re-running under sudo as root\n'
+    exec sudo -E "$0" "$@"
+  else
+    printf '\033[33m  !\033[0m sudo not found — continuing as %s (not root)\n' "$(id -un)"
+  fi
+fi
+# Safety net: if we were elevated, make the original user's toolchain dirs
+# discoverable even if `sudo -E` was restricted by the security policy.
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
+  _uhome="$(eval echo "~$SUDO_USER")"
+  for _d in "$_uhome/.cargo/bin" "$_uhome/.local/bin"; do
+    [ -d "$_d" ] && case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
+  done
+  if [ -d "$_uhome/.nvm/versions/node" ]; then
+    _nbin="$(ls -d "$_uhome"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -1)"
+    [ -n "${_nbin:-}" ] && case ":$PATH:" in *":$_nbin:"*) ;; *) PATH="$_nbin:$PATH" ;; esac
+  fi
+  export PATH
+  export CARGO_HOME="${CARGO_HOME:-$_uhome/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$_uhome/.rustup}"
+fi
 
 # ----------------------------------------------------------------------------
 # Paths
@@ -45,7 +81,7 @@ DB_HOST="${DB_HOST:-localhost}"
 DB_PORT="${DB_PORT:-5432}"
 
 BACKEND_PORT="${BACKEND_PORT:-8081}"   # 8081, not 8080 — VLC commonly squats 8080
-FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+FRONTEND_PORT="${FRONTEND_PORT:-3100}"  # 3100, not 3000 — another app owns 3000 on the server
 
 # If DATABASE_URL is supplied, we use it verbatim and skip local DB creation.
 DATABASE_URL="${DATABASE_URL:-postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${DB_NAME}}"
@@ -80,7 +116,7 @@ for arg in "$@"; do
     --with-scrapers) WITH_SCRAPERS=1 ;;
     --stop)          DO_STOP=1 ;;
     -h|--help)
-      sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     *) die "unknown argument: $arg (try --help)" ;;
   esac
@@ -226,6 +262,21 @@ STRIPE_WEBHOOK_SECRET=
 EOF
   ok "generated backend/.env (random JWT_SECRET + INGEST_KEY)"
 fi
+
+# Keep the port-derived URLs in sync with the current ports on EVERY run, so a
+# changed FRONTEND_PORT (e.g. 3000 -> 3100) propagates into an already-generated
+# backend/.env. Only these two derived lines are touched — secrets are untouched.
+reconcile_env() { # file KEY value
+  local f="$1" k="$2" v="$3"
+  if grep -qE "^${k}=" "$f"; then
+    sed -i.bak -E "s|^${k}=.*|${k}=${v}|" "$f" && rm -f "$f.bak"
+  else
+    printf '%s=%s\n' "$k" "$v" >> "$f"
+  fi
+}
+reconcile_env "$BACKEND_ENV" CORS_ORIGINS    "$CORS_ORIGINS"
+reconcile_env "$BACKEND_ENV" PORTAL_BASE_URL "$PORTAL_BASE_URL"
+ok "synced CORS_ORIGINS / PORTAL_BASE_URL → frontend port ${FRONTEND_PORT}"
 
 FRONTEND_ENV="$FRONTEND_DIR/.env.local"
 if [ -f "$FRONTEND_ENV" ]; then
