@@ -92,6 +92,14 @@ REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
 # a domain). It drives the API URL baked into the frontend, the backend CORS
 # allow-list, and the billing portal base. Default 'localhost' for local dev;
 # on a server set e.g. PUBLIC_HOST=15.235.234.216 (or a DNS name).
+#
+# Did the user explicitly set any public-facing var? If so we (re)write the
+# .env files from it; if NOT, we must NOT clobber a hand-edited public value
+# with the localhost default — we only fill it in when it's missing.
+PUBLIC_EXPLICIT=0
+for _v in PUBLIC_HOST PUBLIC_API_URL CORS_ORIGINS PORTAL_BASE_URL; do
+  [ -n "${!_v:-}" ] && PUBLIC_EXPLICIT=1
+done
 PUBLIC_HOST="${PUBLIC_HOST:-localhost}"
 PUBLIC_API_URL="${PUBLIC_API_URL:-http://${PUBLIC_HOST}:${BACKEND_PORT}/api}"
 # Allow the public origin AND localhost (the browser may hit either). Backend
@@ -281,9 +289,8 @@ EOF
   ok "generated backend/.env (random JWT_SECRET + INGEST_KEY)"
 fi
 
-# Keep the port-derived URLs in sync with the current ports on EVERY run, so a
-# changed FRONTEND_PORT (e.g. 3000 -> 3100) propagates into an already-generated
-# backend/.env. Only these two derived lines are touched — secrets are untouched.
+# set KEY=value in an env file (overwrite existing line, else append). Secrets
+# and unrelated lines are left untouched.
 reconcile_env() { # file KEY value
   local f="$1" k="$2" v="$3"
   if grep -qE "^${k}=" "$f"; then
@@ -292,17 +299,31 @@ reconcile_env() { # file KEY value
     printf '%s=%s\n' "$k" "$v" >> "$f"
   fi
 }
-reconcile_env "$BACKEND_ENV" CORS_ORIGINS    "$CORS_ORIGINS"
-reconcile_env "$BACKEND_ENV" PORTAL_BASE_URL "$PORTAL_BASE_URL"
-ok "synced CORS_ORIGINS / PORTAL_BASE_URL → frontend port ${FRONTEND_PORT}"
+# set KEY only if it's missing — never clobber an existing (possibly hand-edited) value
+fill_env() { # file KEY value
+  grep -qE "^${2}=" "$1" || reconcile_env "$1" "$2" "$3"
+}
 
 FRONTEND_ENV="$FRONTEND_DIR/.env.local"
 [ -f "$FRONTEND_ENV" ] || : > "$FRONTEND_ENV"
-# NEXT_PUBLIC_API_URL is BAKED INTO THE BUILD, so it must point at the public
-# host (browsers can't reach the server's localhost). Reconcile every run; the
-# rebuild below picks it up.
-reconcile_env "$FRONTEND_ENV" NEXT_PUBLIC_API_URL "$PUBLIC_API_URL"
-ok "frontend NEXT_PUBLIC_API_URL → ${PUBLIC_API_URL}"
+
+# NEXT_PUBLIC_API_URL is BAKED INTO THE BUILD and CORS_ORIGINS gates the browser,
+# so both must name the PUBLIC host (browsers can't reach the server's localhost).
+# If the user passed PUBLIC_HOST/PUBLIC_API_URL/CORS_ORIGINS we rewrite from it;
+# otherwise we only fill blanks so a bare re-run can't revert a hand edit to
+# localhost.
+if [ "$PUBLIC_EXPLICIT" = 1 ]; then
+  reconcile_env "$BACKEND_ENV"  CORS_ORIGINS        "$CORS_ORIGINS"
+  reconcile_env "$BACKEND_ENV"  PORTAL_BASE_URL     "$PORTAL_BASE_URL"
+  reconcile_env "$FRONTEND_ENV" NEXT_PUBLIC_API_URL "$PUBLIC_API_URL"
+  ok "public URLs set from PUBLIC_HOST=${PUBLIC_HOST} (API ${PUBLIC_API_URL})"
+else
+  fill_env "$BACKEND_ENV"  CORS_ORIGINS        "$CORS_ORIGINS"
+  fill_env "$BACKEND_ENV"  PORTAL_BASE_URL     "$PORTAL_BASE_URL"
+  fill_env "$FRONTEND_ENV" NEXT_PUBLIC_API_URL "$PUBLIC_API_URL"
+  ok "kept existing CORS_ORIGINS / NEXT_PUBLIC_API_URL (pass PUBLIC_HOST=… to overwrite)"
+fi
+PUBLIC_API_URL="$(grep -E '^NEXT_PUBLIC_API_URL=' "$FRONTEND_ENV" | head -1 | cut -d= -f2-)"
 
 # The scrapers read INGEST_KEY/BACKEND_URL from the environment (no dotenv), so
 # pull the authoritative INGEST_KEY out of backend/.env for any scraper launch.
@@ -364,6 +385,23 @@ kill_legacy_nohup() {
   [ "$killed" = 1 ] && ok "killed leftover nohup processes (freed the ports for PM2)"
 }
 
+# Hard-free a TCP port: kill whatever is LISTENING on it, regardless of how it
+# was started (orphaned next/cargo/nohup that PM2 lost track of). This is what
+# clears the persistent "Address already in use (os error 98)" / EADDRINUSE.
+free_port() { # port
+  local p="$1" pids=""
+  command -v fuser >/dev/null 2>&1 && fuser -k "${p}/tcp" >/dev/null 2>&1 || true
+  if command -v lsof >/dev/null 2>&1; then
+    pids="$(lsof -ti "tcp:${p}" -sTCP:LISTEN 2>/dev/null || true)"
+  elif command -v ss >/dev/null 2>&1; then
+    pids="$(ss -ltnpH "sport = :${p}" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)"
+  fi
+  if [ -n "$pids" ]; then
+    kill $pids 2>/dev/null || true; sleep 1; kill -9 $pids 2>/dev/null || true
+    ok "freed port $p"
+  fi
+}
+
 wait_health() { # poll the backend until /api/health answers (migrations + admin seed run on boot)
   printf "  waiting for /api/health "
   for _ in $(seq 1 60); do
@@ -383,16 +421,18 @@ ensure_pm2() {
 }
 
 start_with_pm2() {
-  kill_legacy_nohup
   # Pass ports + the real INGEST_KEY through so ecosystem.config.cjs picks them up.
   export BACKEND_PORT FRONTEND_PORT BACKEND_URL="http://localhost:${BACKEND_PORT}" INGEST_KEY
   local only="backend,frontend"
   [ "$WITH_SCRAPERS" = 1 ] && only="$only,$SCRAPER_APPS"
   say "Starting stack under PM2 ($only)"
-  # startOrReload = start if new, zero-downtime reload if already registered
-  # (picks up the freshly-built binary/bundle and the latest env on every run).
-  pm2 startOrReload "$ECOSYSTEM" --only "$only" --update-env 2>/dev/null \
-    || pm2 start "$ECOSYSTEM" --only "$only" --update-env
+  # Tear down any prior supervision of these apps FIRST, so PM2 can't respawn
+  # into the ports while we free them (that race is what made it crash-loop).
+  pm2 delete ${only//,/ } >/dev/null 2>&1 || true
+  kill_legacy_nohup
+  free_port "$BACKEND_PORT"
+  free_port "$FRONTEND_PORT"
+  pm2 start "$ECOSYSTEM" --only "$only" --update-env
   pm2 save >/dev/null 2>&1 || true
   ok "pm2 apps online: $only"
   wait_health || warn "backend health check timed out — inspect with: pm2 logs backend"
