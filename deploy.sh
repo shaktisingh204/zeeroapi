@@ -139,6 +139,16 @@ stop_one() {
 }
 if [ "${DO_STOP:-0}" = 1 ]; then
   say "Stopping services"
+  # PM2-managed apps (the default since this stack moved to PM2)
+  if command -v pm2 >/dev/null 2>&1; then
+    if pm2 delete "$REPO_ROOT/ecosystem.config.cjs" >/dev/null 2>&1; then
+      ok "stopped PM2 apps (backend, frontend, scrapers)"
+      pm2 save >/dev/null 2>&1 || true
+    else
+      warn "no PM2 apps from this stack were running"
+    fi
+  fi
+  # Legacy nohup pidfiles (only present if started with NO_PM2=1)
   for f in "$LOG_DIR"/*.pid; do
     [ -e "$f" ] || continue
     stop_one "$(basename "$f" .pid)"
@@ -430,7 +440,11 @@ if [ "$DO_START" = 1 ]; then
   echo "  Frontend : http://localhost:${FRONTEND_PORT}"
   echo "  API      : ${PUBLIC_API_URL}"
   echo "  Admin    : http://localhost:${FRONTEND_PORT}/app  ($(grep -E '^BOOTSTRAP_ADMIN_EMAIL=' "$BACKEND_ENV" | cut -d= -f2-) / $(grep -E '^BOOTSTRAP_ADMIN_PASSWORD=' "$BACKEND_ENV" | cut -d= -f2-))"
-  echo "  Logs     : ${LOG_DIR#$REPO_ROOT/}/   ·   stop with: ./deploy.sh --stop"
+  if [ "$USED_PM2" = 1 ]; then
+    echo "  Process  : PM2  ·  pm2 status · pm2 logs · pm2 restart all · stop: ./deploy.sh --stop"
+  else
+    echo "  Logs     : ${LOG_DIR#$REPO_ROOT/}/   ·   stop with: ./deploy.sh --stop"
+  fi
   [ "$WITH_SCRAPERS" != 1 ] && echo "  Scrapers : re-run with --with-scrapers to launch them (melbet runs via the backend)"
 else
   echo "  Bootstrap complete. Start later with: ./deploy.sh --no-build"
