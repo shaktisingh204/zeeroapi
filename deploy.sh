@@ -414,10 +414,18 @@ wait_health() { # poll the backend until /api/health answers (migrations + admin
 }
 
 ensure_pm2() {
-  have pm2 && return 0
+  have pm2 && { ok "pm2 found: $(command -v pm2)"; return 0; }
   say "PM2 not found — installing globally (npm i -g pm2)"
-  npm install -g pm2 >/dev/null 2>&1 && { ok "pm2 installed"; return 0; } \
-    || { warn "could not install pm2 — falling back to nohup"; return 1; }
+  # Don't hide the failure: a silent fall-through to nohup is exactly what makes
+  # "pm2 didn't start" impossible to diagnose. Show npm's error if it fails.
+  if npm install -g pm2; then
+    hash -r 2>/dev/null || true   # refresh the shell's command lookup cache
+    have pm2 && { ok "pm2 installed: $(command -v pm2)"; return 0; }
+    warn "npm reported success but 'pm2' is not on PATH (global bin dir not in PATH?) — falling back to nohup"
+    return 1
+  fi
+  warn "could not install pm2 (see npm error above) — falling back to nohup"
+  return 1
 }
 
 start_with_pm2() {
@@ -432,8 +440,16 @@ start_with_pm2() {
   kill_legacy_nohup
   free_port "$BACKEND_PORT"
   free_port "$FRONTEND_PORT"
-  pm2 start "$ECOSYSTEM" --only "$only" --update-env
+  # Guard the start: under `set -e` a non-zero exit here would abort the whole
+  # script before we could show the cause. Capture it, show pm2's view, retry once.
+  if ! pm2 start "$ECOSYSTEM" --only "$only" --update-env; then
+    warn "pm2 start failed (output above) — freeing ports and retrying once"
+    free_port "$BACKEND_PORT"; free_port "$FRONTEND_PORT"
+    pm2 start "$ECOSYSTEM" --only "$only" --update-env \
+      || die "pm2 could not start the stack. Inspect with: pm2 logs --lines 50"
+  fi
   pm2 save >/dev/null 2>&1 || true
+  pm2 status || true
   ok "pm2 apps online: $only"
   wait_health || warn "backend health check timed out — inspect with: pm2 logs backend"
   [ "$WITH_SCRAPERS" != 1 ] && warn "scrapers not started — re-run with --with-scrapers (melbet runs via the backend)"

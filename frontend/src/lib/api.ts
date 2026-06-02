@@ -23,7 +23,7 @@ import type {
   User,
 } from "./types";
 
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8081/api";
+const BASE = process.env.NEXT_PUBLIC_API_URL || "http://15.235.234.216:8081/api";
 const TOKEN_KEY = "melbet_token";
 
 // Admin "active provider" — scopes the data views (matches/live/sports/leagues/stats).

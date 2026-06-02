@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
-const BASE = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8081/api").replace(/\/$/, "");
+const BASE = (process.env.NEXT_PUBLIC_API_URL || "http://15.235.234.216:8081/api").replace(/\/$/, "");
 
 interface Component {
   name: string;

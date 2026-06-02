@@ -1,7 +1,7 @@
 // Client for the ZeroApi self-serve customer portal (separate auth from admin).
 import type { ApiKey, Customer, Plan, EndpointStat, StatusStat, LatencyPoint } from "./types";
 
-const BASE = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8081/api").replace(/\/$/, "");
+const BASE = (process.env.NEXT_PUBLIC_API_URL || "http://15.235.234.216:8081/api").replace(/\/$/, "");
 const TOKEN_KEY = "zeroapi_customer_token";
 
 export function getCustomerToken(): string | null {

@@ -6,7 +6,7 @@ import { api } from "@/lib/api";
 import type { Plan } from "@/lib/types";
 import { PageHeader, Spinner } from "@/components/ui";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8081/api";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://15.235.234.216:8081/api";
 const V1_URL = `${API_BASE}/v1`;
 const SWAGGER_URL = `${V1_URL}/docs`;
 
