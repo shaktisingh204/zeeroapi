@@ -239,7 +239,8 @@ async fn sidebar_q(State(state): State<AppState>, client: ApiClient, Query(q): Q
 const MATCH_SELECT: &str = "
     SELECT m.id, m.provider, m.sport_id, s.name AS sport_name, m.league_id, l.name AS league_name,
            m.home_team, m.away_team, m.home_logo, m.away_logo, m.start_time, m.status,
-           m.home_score, m.away_score, m.period, m.match_time, m.result, m.finished_at, m.updated_at
+           m.home_score, m.away_score, m.period, m.match_time, m.result, m.finished_at,
+           m.suspended, m.updated_at
     FROM matches m JOIN sports s ON s.id = m.sport_id LEFT JOIN leagues l ON l.id = m.league_id";
 
 // ---- matches (list) ----
@@ -397,11 +398,23 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
         "league_name": "UEFA Champions League", "home_team": "Paris Saint-Germain",
         "away_team": "Arsenal", "home_logo": "https://v3.traincdn.com/sfiles/logo_teams/12709.webp",
         "status": "live", "home_score": 1, "away_score": 1, "match_time": "72'",
-        "updated_at": "2026-05-31T12:00:00Z" }]);
+        "suspended": false, "updated_at": "2026-05-31T12:00:00Z" }]);
     let odds_ex = json!([
-        { "market": "Match Result", "outcome": "W1", "value": "3.88", "provider": "melbet" },
-        { "market": "Total", "outcome": "Over", "value": "1.85", "param": "2.5", "provider": "melbet" },
-        { "market": "Double Chance", "outcome": "1X", "value": "1.30", "provider": "melbet" }
+        { "market": "Match Result", "outcome": "W1", "value": "3.88", "suspended": false, "provider": "melbet" },
+        { "market": "Total", "outcome": "Over", "value": "1.85", "param": "2.5", "suspended": false, "provider": "melbet" },
+        { "market": "Double Chance", "outcome": "1X", "value": "1.30", "suspended": false, "provider": "melbet" }
+    ]);
+    // Exchange providers (e.g. d247 / diamondexch) quote BACK + LAY with matched
+    // VOLUME and suspend (padlock) markets in-play. Their docs show that shape.
+    let exch_match_ex = json!([{ "id": 884213, "provider": "diamondexch", "sport_name": "Cricket",
+        "league_name": "Indian Premier League", "home_team": "Mumbai Indians",
+        "away_team": "Chennai Super Kings", "status": "live", "home_score": null, "away_score": null,
+        "match_time": "MI 142/3 (15.3)", "suspended": false, "updated_at": "2026-06-09T14:00:00Z" }]);
+    let exch_odds_ex = json!([
+        { "market": "Match Odds", "outcome": "Mumbai Indians", "value": "1.85", "lay": "1.87", "volume": "240310.00", "suspended": false, "provider": "diamondexch" },
+        { "market": "Match Odds", "outcome": "Chennai Super Kings", "value": "2.12", "lay": "2.16", "volume": "198450.00", "suspended": false, "provider": "diamondexch" },
+        { "market": "Bookmaker", "outcome": "Mumbai Indians", "value": "78", "lay": "82", "suspended": true, "provider": "diamondexch" },
+        { "market": "Winner", "outcome": "Mumbai Indians", "value": "3.40", "lay": "3.55", "suspended": false, "provider": "diamondexch" }
     ]);
     let provider_ex = json!([{ "slug": "melbet", "name": "MelBet",
         "capabilities": ["sports","leagues","matches","live","odds","full_markets"], "is_active": true }]);
@@ -428,6 +441,12 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
             .unwrap_or_default();
         let tag = format!("{} ({})", p.name, if p.is_active { "active" } else { "disabled" });
         let pv = &p.slug;
+        // Exchanges expose a different native data shape (back/lay/volume/suspended)
+        // than sportsbooks (single price). Document each provider with its own shape.
+        let is_exchange = pv == "diamondexch" || caps.iter().any(|c| c == "exchange");
+        let m_ex = if is_exchange { &exch_match_ex } else { &match_ex };
+        let o_ex = if is_exchange { &exch_odds_ex } else { &odds_ex };
+        let odds_note = if is_exchange { "odds (back, lay, volume, suspended)" } else { "odds" };
 
         if caps.iter().any(|c| c == "sports") {
             paths.insert(format!("/{pv}/sports"), json!({"get": {"tags":[tag.clone()],
@@ -458,24 +477,25 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
                     {"name":"search","in":"query","schema":{"type":"string"}},
                     {"name":"limit","in":"query","schema":{"type":"integer","default":50}},
                     {"name":"offset","in":"query","schema":{"type":"integer","default":0}}],
-                "responses": {"200": resp("Matches", &match_ex)}}}));
+                "responses": {"200": resp("Matches", m_ex)}}}));
             paths.insert(format!("/{pv}/matches/{{id}}"), json!({"get": {"tags":[tag.clone()],
-                "summary": format!("{} — match detail + odds", p.name),
+                "summary": format!("{} — match detail + {}", p.name, odds_note),
                 "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],
                 "responses": {"200": resp("Match with odds",
-                    &json!({"id":2267604396_i64,"home_team":"PSG","away_team":"Arsenal","status":"live","odds":odds_ex})),
+                    &json!({"id":m_ex[0]["id"],"home_team":m_ex[0]["home_team"],"away_team":m_ex[0]["away_team"],
+                        "status":"live","suspended":false,"odds":o_ex})),
                     "404": {"description":"Not found"}}}}));
         }
         if caps.iter().any(|c| c == "live") {
             paths.insert(format!("/{pv}/live"), json!({"get": {"tags":[tag.clone()],
                 "summary": format!("{} — live matches", p.name),
-                "responses": {"200": resp("Live matches", &match_ex)}}}));
+                "responses": {"200": resp("Live matches", m_ex)}}}));
         }
         if caps.iter().any(|c| c == "odds") {
             paths.insert(format!("/{pv}/odds/{{match_id}}"), json!({"get": {"tags":[tag.clone()],
-                "summary": format!("{} — odds for a match", p.name),
+                "summary": format!("{} — {}", p.name, odds_note),
                 "parameters":[{"name":"match_id","in":"path","required":true,"schema":{"type":"integer"}}],
-                "responses": {"200": resp("Odds", &odds_ex)}}}));
+                "responses": {"200": resp("Odds", o_ex)}}}));
         }
     }
 
@@ -489,7 +509,7 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
       "info": {
         "title": "ZeroApi — Sports Data API",
         "version": "1.0.0",
-        "description": format!("Real-time sports, matches, odds & live scores across multiple bookmaker providers.\n\n**Provider-based:** every endpoint is namespaced under `/api/v1/{{provider}}/…`, and each provider exposes its own endpoint set + data.\n\n**Plans:** {plan_desc}\n\nAuthenticate with the `X-API-Key` header (get a key in your ZeroApi dashboard).")
+        "description": format!("Real-time sports, matches, odds & live scores across multiple bookmaker providers.\n\n**Provider-based:** every endpoint is namespaced under `/api/v1/{{provider}}/…`, and each provider exposes its own endpoint set and its own native data shape.\n\n**Sportsbooks** (melbet, 1xbet, betwinner, megapari, 1win, bcgame) quote a single decimal `value` per outcome. **Exchanges** (d247 / diamondexch) quote a best-`value` (back), a `lay` price and matched `volume`. Any line or whole match that is locked in-play carries `suspended: true` (match-level and per-odd).\n\n**Plans:** {plan_desc}\n\nAuthenticate with the `X-API-Key` header (get a key in your ZeroApi dashboard).")
       },
       "servers": [{"url": "/api/v1"}],
       "security": [{"ApiKeyAuth": []}],

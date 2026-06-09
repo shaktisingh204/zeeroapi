@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Activity } from "lucide-react";
+import { AuthShell, AuthField, AuthButton, AuthError } from "@/components/AuthShell";
 import { portal, setCustomerToken } from "@/lib/portal";
 import { api, setToken } from "@/lib/api";
 
@@ -39,60 +39,55 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <div className="flex items-center gap-2 justify-center mb-8">
-          <div className="h-10 w-10 rounded-xl bg-brand flex items-center justify-center">
-            <Activity size={22} className="text-black" />
-          </div>
-          <span className="text-xl font-semibold text-white">ZeroApi</span>
-        </div>
-
-        <form onSubmit={submit} className="card p-6 space-y-4">
-          <h1 className="text-lg font-semibold text-white">Sign in to ZeroApi</h1>
-          <p className="text-xs text-muted">Admin or customer — one sign-in.</p>
-          {error && (
-            <div className="rounded-lg bg-live/15 text-live text-sm px-3 py-2">
-              {error}
-            </div>
-          )}
-          <div>
-            <label className="text-sm text-muted">Email</label>
-            <input
-              className="input mt-1"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-          </div>
-          <div>
-            <div className="flex items-center justify-between">
-              <label className="text-sm text-muted">Password</label>
-              <Link href="/forgot" className="text-xs text-brand hover:underline">
-                Forgot password?
-              </Link>
-            </div>
-            <input
-              className="input mt-1"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
-            />
-          </div>
-          <button className="btn-primary w-full" disabled={loading}>
-            {loading ? "Signing in…" : "Sign in"}
-          </button>
-          <p className="text-xs text-muted text-center">
-            No account?{" "}
-            <Link href="/signup" className="text-brand">
-              Create one
-            </Link>
-          </p>
-        </form>
+    <AuthShell>
+      <div className="auth-in mb-8">
+        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Welcome back</h1>
+        <p className="mt-1.5 text-sm text-slate-500">Sign in to your ZeroApi dashboard.</p>
       </div>
-    </div>
+
+      <form onSubmit={submit} className="space-y-4">
+        <AuthError message={error} />
+
+        <AuthField
+          label="Email"
+          type="email"
+          value={email}
+          onChange={setEmail}
+          placeholder="you@company.com"
+          autoComplete="email"
+          required
+          delay={60}
+        />
+
+        <AuthField
+          label="Password"
+          type="password"
+          value={password}
+          onChange={setPassword}
+          placeholder="••••••••"
+          autoComplete="current-password"
+          required
+          delay={120}
+          trailing={
+            <Link href="/forgot" className="text-xs font-medium text-emerald-600 hover:text-emerald-700">
+              Forgot password?
+            </Link>
+          }
+        />
+
+        <div className="auth-in pt-1" style={{ animationDelay: "180ms" }}>
+          <AuthButton loading={loading} loadingLabel="Signing in…">
+            Sign in
+          </AuthButton>
+        </div>
+      </form>
+
+      <p className="auth-in mt-6 text-sm text-slate-500" style={{ animationDelay: "240ms" }}>
+        No account?{" "}
+        <Link href="/signup" className="font-semibold text-emerald-600 hover:text-emerald-700">
+          Create one
+        </Link>
+      </p>
+    </AuthShell>
   );
 }

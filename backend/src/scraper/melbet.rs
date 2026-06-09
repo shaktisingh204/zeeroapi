@@ -471,6 +471,13 @@ fn parse_game(g: &Value, is_live: bool) -> Option<ScrapedMatch> {
     // Score block (SC). FS = full score, S1/S2 = home/away.
     let (home_score, away_score, period, match_time) = parse_score(g.get("SC"));
 
+    // Blocked/suspended flag. 1xbet-family feeds mark a blocked game with "B".
+    // Accept it as a bool, or as the integer 1; default false if absent.
+    let suspended = g
+        .get("B")
+        .map(|v| v.as_bool().unwrap_or_else(|| v.as_i64() == Some(1)))
+        .unwrap_or(false);
+
     let odds = collect_odds(g);
 
     Some(ScrapedMatch {
@@ -488,6 +495,7 @@ fn parse_game(g: &Value, is_live: bool) -> Option<ScrapedMatch> {
         away_score,
         period,
         match_time,
+        suspended,
         odds,
     })
 }
@@ -704,8 +712,8 @@ async fn persist_match(pool: &PgPool, m: &ScrapedMatch) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO matches
             (id, sport_id, league_id, home_team, away_team, start_time, status,
-             home_score, away_score, period, match_time, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+             home_score, away_score, period, match_time, suspended, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
          ON CONFLICT (id) DO UPDATE SET
             sport_id   = EXCLUDED.sport_id,
             league_id  = EXCLUDED.league_id,
@@ -717,6 +725,7 @@ async fn persist_match(pool: &PgPool, m: &ScrapedMatch) -> anyhow::Result<()> {
             away_score = EXCLUDED.away_score,
             period     = EXCLUDED.period,
             match_time = EXCLUDED.match_time,
+            suspended  = EXCLUDED.suspended,
             updated_at = now()",
     )
     .bind(m.id)
@@ -730,6 +739,7 @@ async fn persist_match(pool: &PgPool, m: &ScrapedMatch) -> anyhow::Result<()> {
     .bind(m.away_score)
     .bind(&m.period)
     .bind(&m.match_time)
+    .bind(m.suspended)
     .execute(pool)
     .await?;
 

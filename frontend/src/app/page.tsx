@@ -38,6 +38,16 @@ import {
   CartesianGrid,
 } from "recharts";
 import { DOCS_URL } from "@/lib/portal";
+import {
+  getProviders,
+  getPublicPlans,
+  getLandingStats,
+  getStatus,
+  formatPrice,
+  formatQuota,
+  type LandingStats,
+  type PublicStatus,
+} from "@/lib/landing";
 
 /* ------------------------------------------------------------------ */
 /*  Shared button styles (light, pill system). One label per intent.  */
@@ -424,6 +434,70 @@ function Faq() {
 export default function Landing() {
   useReveal();
 
+  // ---- Live public data (degrades to the static defaults above) ----
+  const [providerNames, setProviderNames] = useState<string[]>(PROVIDERS);
+  const [stats, setStats] = useState<LandingStats | null>(null);
+  const [status, setStatus] = useState<PublicStatus | null>(null);
+  const [livePlans, setLivePlans] = useState<typeof PLANS | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getProviders().then((rows) => {
+      if (alive && rows.length) setProviderNames(rows.map((r) => r.name));
+    });
+    getLandingStats().then((s) => alive && s && setStats(s));
+    getStatus().then((s) => alive && s && setStatus(s));
+    getPublicPlans().then((rows) => {
+      if (!alive || !rows.length) return;
+      const sorted = [...rows].sort((a, b) => a.sort_order - b.sort_order);
+      const mid = sorted.length >= 3 ? 1 : sorted.length - 1;
+      setLivePlans(
+        sorted.map((p, i) => ({
+          name: p.name,
+          price: formatPrice(p.price_cents),
+          per: "/mo",
+          rate: `${p.rate_limit_per_min.toLocaleString()} req/min`,
+          quota: formatQuota(p.monthly_quota),
+          features: p.features?.length ? p.features : ["Full API access"],
+          popular: i === mid,
+        }))
+      );
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Stats band: real counts where we have them, sensible claims otherwise.
+  const statHues = ["#10b981", "#0ea5e9", "#8b5cf6", "#f59e0b"];
+  const statCards = stats
+    ? [
+        { n: String(stats.providers), l: "bookmakers", c: statHues[0] },
+        { n: `${stats.sports}+`, l: "sports", c: statHues[1] },
+        { n: stats.live_matches.toLocaleString(), l: "live matches now", c: statHues[2] },
+        { n: `${stats.markets}+`, l: "markets", c: statHues[3] },
+      ]
+    : STATS;
+
+  const sportHues = [
+    "#10b981", "#84cc16", "#f59e0b", "#0ea5e9", "#f43f5e", "#14b8a6",
+    "#8b5cf6", "#ec4899", "#22c55e", "#6366f1", "#d97706", "#06b6d4",
+    "#16a34a", "#ef4444", "#3b82f6", "#a855f7",
+  ];
+  const sportCards =
+    stats?.top_sports?.length
+      ? stats.top_sports.map((s, i) => ({ name: s.name, c: sportHues[i % sportHues.length], matches: s.matches }))
+      : SPORTS.map((s) => ({ ...s, matches: 0 }));
+
+  const planCards = livePlans ?? PLANS;
+
+  const statusMeta: Record<string, { label: string; color: string }> = {
+    operational: { label: "All systems operational", color: "#10b981" },
+    degraded: { label: "Partial degradation", color: "#f59e0b" },
+    down: { label: "Service disruption", color: "#f43f5e" },
+  };
+  const sm = status ? statusMeta[status.overall] ?? statusMeta.operational : null;
+
   return (
     <div
       style={{ colorScheme: "light" }}
@@ -501,7 +575,7 @@ export default function Landing() {
         </p>
         <div className="relative">
           <div className="lp-marquee-track flex w-max gap-4">
-            {[...PROVIDERS, ...PROVIDERS, ...PROVIDERS, ...PROVIDERS].map((p, i) => (
+            {[...providerNames, ...providerNames, ...providerNames, ...providerNames].map((p, i) => (
               <div key={i} className="flex shrink-0 items-center gap-2.5 rounded-2xl border border-slate-200 bg-slate-50 px-5 py-3">
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white text-sm font-bold text-emerald-600 shadow-sm">
                   {p[0]}
@@ -516,7 +590,7 @@ export default function Landing() {
       {/* ---------------- Stats band ---------------- */}
       <section className="mx-auto max-w-[1200px] px-5 py-16">
         <div className="lp-reveal grid grid-cols-2 gap-4 md:grid-cols-4">
-          {STATS.map((s) => (
+          {statCards.map((s) => (
             <div key={s.l} className="rounded-2xl border border-slate-200 bg-white p-6 text-center">
               <div className="text-4xl font-bold tabular-nums" style={{ color: s.c }}>{s.n}</div>
               <div className="mt-1 text-sm font-medium text-slate-500">{s.l}</div>
@@ -661,7 +735,7 @@ export default function Landing() {
           <p className="mt-3 text-lg text-slate-600">From football to esports, the response shape never changes. Learn it once, use it everywhere.</p>
         </div>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-          {SPORTS.map((s, i) => (
+          {sportCards.map((s, i) => (
             <div
               key={s.name}
               className="lp-reveal flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3.5 transition-colors hover:border-slate-300"
@@ -670,7 +744,10 @@ export default function Landing() {
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-sm font-bold" style={{ background: s.c + "1a", color: s.c }}>
                 {s.name[0]}
               </span>
-              <span className="text-sm font-semibold text-slate-800">{s.name}</span>
+              <span className="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800">{s.name}</span>
+              {s.matches > 0 && (
+                <span className="shrink-0 text-xs font-medium tabular-nums text-slate-400">{s.matches.toLocaleString()}</span>
+              )}
             </div>
           ))}
         </div>
@@ -828,7 +905,7 @@ curl -H "X-API-Key: mk_live_..." \\
         </div>
 
         <div className="grid items-start gap-4 md:grid-cols-3">
-          {PLANS.map((p) => (
+          {planCards.map((p) => (
             <div
               key={p.name}
               className={`lp-reveal relative rounded-3xl border bg-white p-7 ${
@@ -920,8 +997,20 @@ curl -H "X-API-Key: mk_live_..." \\
           <FooterCol title="Account" links={[["Sign in", "/login"], ["Dashboard", "/portal"], ["Operators", "/login"]]} />
         </div>
         <div className="border-t border-slate-200/70">
-          <div className="mx-auto max-w-[1200px] px-5 py-5 text-xs text-slate-400">
-            © 2026 ZeroApi. All rights reserved.
+          <div className="mx-auto flex max-w-[1200px] flex-wrap items-center justify-between gap-3 px-5 py-5 text-xs text-slate-400">
+            <span>© 2026 ZeroApi. All rights reserved.</span>
+            {sm && (
+              <Link
+                href="/status"
+                className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 font-medium text-slate-600 transition-colors hover:border-slate-300"
+              >
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full opacity-60" style={{ background: sm.color }} />
+                  <span className="relative inline-flex h-2 w-2 rounded-full" style={{ background: sm.color }} />
+                </span>
+                {sm.label}
+              </Link>
+            )}
           </div>
         </div>
       </footer>

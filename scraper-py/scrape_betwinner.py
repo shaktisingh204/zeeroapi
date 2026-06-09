@@ -152,20 +152,45 @@ EXTRACT_JS = r"""
             const timeInfo = (g.querySelector("[class*='game-info'], [class*='timer'], [class*='period']")
                               || {}).innerText?.trim() || null;
 
+            // A cell is "locked"/suspended when the SPA disables the odds:
+            // a lock/disabled/blocked class on the cell or its value node, a
+            // disabled attribute, or a value that is a dash/lock glyph instead
+            // of a number.
+            const isLocked = (m, valTxt) => {
+                try {
+                    const cls = (m.className || '') + ' ' +
+                        ((m.querySelector('.ui-market__value') || {}).className || '');
+                    if (/lock|disabl|block|coef-blocked|suspend|inactive|non-active/i.test(cls)) return true;
+                    if (m.getAttribute('aria-disabled') === 'true' || m.hasAttribute('disabled')) return true;
+                    if (m.querySelector("[class*='lock'], [class*='ico-lock'], svg[class*='lock']")) return true;
+                    const t = (valTxt || '').trim();
+                    if (t && /^[—–\-−·•🔒]+$/.test(t)) return true;
+                } catch (e) {}
+                return false;
+            };
+
             const markets = [];
+            let anyOpen = false;
             [...g.querySelectorAll('.ui-market')].forEach((m, i) => {
                 const label = m.getAttribute('aria-label')
                     || m.getAttribute('data-original-title')
                     || labels[i] || null;
                 const valTxt = (m.querySelector('.ui-market__value') || {}).innerText?.trim() || '';
                 const num = parseFloat(valTxt.replace(',', '.'));
-                if (label && !isNaN(num) && num >= 1.0) {
-                    markets.push({ label, value: num });
+                const locked = isLocked(m, valTxt);
+                if (label && !isNaN(num) && num >= 1.0 && !locked) {
+                    markets.push({ label, value: num, suspended: false });
+                    anyOpen = true;
+                } else if (label && locked) {
+                    // Emit locked outcomes instead of dropping them, value 0.
+                    markets.push({ label, value: 0, suspended: true });
                 }
             });
+            // Whole-match suspension: there are odds cells but none are open.
+            const suspended = markets.length > 0 && !anyOpen;
 
             out.push({ teams: teams.slice(0, 2), scores, league, timeInfo, markets,
-                       homeLogo, awayLogo, leagueLogo, sportLogo });
+                       suspended, homeLogo, awayLogo, leagueLogo, sportLogo });
         });
     });
     return out;
@@ -187,7 +212,9 @@ OUTCOME_MAP = {
 def name_market(label):
     if label in OUTCOME_MAP:
         return OUTCOME_MAP[label]
-    return ("Main", label)
+    # Unknown column label: keep it verbatim as both market and outcome so we
+    # capture every visible odds column instead of collapsing them into "Main".
+    return (label, label)
 
 
 def to_int(s):
@@ -211,6 +238,11 @@ def build_match(card, status, sport_hint):
             "outcome": outcome,
             "value": round(float(m["value"]), 3),
             "param": None,
+            # New optional ingest fields. Sportsbook odds are back-only, so no
+            # lay/volume; suspended flags a locked outcome.
+            "lay": None,
+            "volume": None,
+            "suspended": bool(m.get("suspended", False)),
         })
 
     return {
@@ -220,6 +252,7 @@ def build_match(card, status, sport_hint):
         "home": home,
         "away": away,
         "status": status,
+        "suspended": bool(card.get("suspended", False)),
         "home_score": home_score if status == "live" else None,
         "away_score": away_score if status == "live" else None,
         "time": card.get("timeInfo"),

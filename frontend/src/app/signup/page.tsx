@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Activity } from "lucide-react";
+import { AuthShell, AuthField, AuthButton, AuthError } from "@/components/AuthShell";
 import { portal, setCustomerToken } from "@/lib/portal";
 
 export default function PortalSignupPage() {
@@ -30,66 +30,62 @@ export default function PortalSignupPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <div className="flex items-center gap-2 justify-center mb-8">
-          <div className="h-10 w-10 rounded-xl bg-brand flex items-center justify-center">
-            <Activity size={22} className="text-black" />
-          </div>
-          <span className="text-xl font-semibold text-white">ZeroApi</span>
-        </div>
-
-        <form onSubmit={submit} className="card p-6 space-y-4">
-          <h1 className="text-lg font-semibold text-white">Create your ZeroApi account</h1>
-          {error && (
-            <div className="rounded-lg bg-live/15 text-live text-sm px-3 py-2">
-              {error}
-            </div>
-          )}
-          <div>
-            <label className="text-sm text-muted">Name</label>
-            <input
-              className="input mt-1"
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              required
-            />
-          </div>
-          <div>
-            <label className="text-sm text-muted">Email</label>
-            <input
-              className="input mt-1"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-          </div>
-          <div>
-            <label className="text-sm text-muted">Password</label>
-            <input
-              className="input mt-1"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              minLength={8}
-              required
-            />
-            <p className="text-xs text-muted mt-1">min 8 characters</p>
-          </div>
-          <button className="btn-primary w-full" disabled={loading}>
-            {loading ? "Creating account…" : "Create account"}
-          </button>
-          <p className="text-xs text-muted text-center">
-            Already have an account?{" "}
-            <Link href="/login" className="text-brand">
-              Sign in
-            </Link>
-          </p>
-        </form>
+    <AuthShell>
+      <div className="auth-in mb-8">
+        <h1 className="text-2xl font-bold tracking-tight text-slate-900">Create your account</h1>
+        <p className="mt-1.5 text-sm text-slate-500">Free to start. No card required.</p>
       </div>
-    </div>
+
+      <form onSubmit={submit} className="space-y-4">
+        <AuthError message={error} />
+
+        <AuthField
+          label="Name"
+          value={name}
+          onChange={setName}
+          placeholder="Ada Lovelace"
+          autoComplete="name"
+          required
+          delay={60}
+        />
+
+        <AuthField
+          label="Email"
+          type="email"
+          value={email}
+          onChange={setEmail}
+          placeholder="you@company.com"
+          autoComplete="email"
+          required
+          delay={120}
+        />
+
+        <AuthField
+          label="Password"
+          type="password"
+          value={password}
+          onChange={setPassword}
+          placeholder="••••••••"
+          autoComplete="new-password"
+          required
+          minLength={8}
+          hint="At least 8 characters."
+          delay={180}
+        />
+
+        <div className="auth-in pt-1" style={{ animationDelay: "240ms" }}>
+          <AuthButton loading={loading} loadingLabel="Creating account…">
+            Create account
+          </AuthButton>
+        </div>
+      </form>
+
+      <p className="auth-in mt-6 text-sm text-slate-500" style={{ animationDelay: "300ms" }}>
+        Already have an account?{" "}
+        <Link href="/login" className="font-semibold text-emerald-600 hover:text-emerald-700">
+          Sign in
+        </Link>
+      </p>
+    </AuthShell>
   );
 }

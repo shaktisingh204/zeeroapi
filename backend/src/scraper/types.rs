@@ -36,6 +36,7 @@ pub struct ScrapedMatch {
     pub away_score: Option<i32>,
     pub period: Option<String>,
     pub match_time: Option<String>,
+    pub suspended: bool,
     pub odds: Vec<ScrapedOdd>,
 }
 

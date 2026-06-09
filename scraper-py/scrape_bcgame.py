@@ -125,63 +125,154 @@ def _to_int(x):
         return None
 
 
+def _to_float(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+# BetBy outcome/market status flags vary by feed version; treat anything that is
+# explicitly NOT one of these "open" values (or that lacks a price) as suspended.
+_OPEN_STATUS = {0, 1, "0", "1", "active", "open", "Active", "Open"}
+
+
+def _is_suspended_flag(obj):
+    """Return True if a market/outcome dict carries an explicit suspended/locked
+    signal, False if it carries an explicit active signal, None if unknown."""
+    if not isinstance(obj, dict):
+        return None
+    for k in ("suspended", "locked", "is_suspended", "isLocked"):
+        if k in obj and isinstance(obj[k], bool):
+            return obj[k]
+    for k in ("status", "state", "active"):
+        if k in obj:
+            v = obj[k]
+            if isinstance(v, bool):
+                return not v  # active=False -> suspended
+            return v not in _OPEN_STATUS
+    return None
+
+
+def _event_suspended(ev, d):
+    """Whole-event lock: BetBy exposes this via state.status (status codes other
+    than the normal not-started/live ones mean suspended/closed)."""
+    state = ev.get("state") or {}
+    flag = _is_suspended_flag(state)
+    if flag is not None:
+        return flag
+    flag = _is_suspended_flag(d)
+    return bool(flag) if flag is not None else False
+
+
+def _collect_odds(ev, markets, home, away):
+    """Flatten an event's markets[typeId][specifier][outcomeId] tree into a list
+    of ingest odd dicts. Captures every line/variant. Outcomes that are flagged
+    suspended (or lack a usable price) are emitted with suspended=True rather than
+    dropped, so the board can show locked markets."""
+    odds = []
+    seen = set()
+    for mtid, specs in (ev.get("markets") or {}).items():
+        desc = markets.get(str(mtid), {})
+        raw_mname = desc.get("name") or f"Market {mtid}"
+        omap = desc.get("outcomes", {})
+        for spec, outs in (specs or {}).items():
+            vals = spec_values(spec)
+            line = spec_line(spec)
+            mname = resolve_name(raw_mname, vals, home, away)[:60]
+            # A specifier block may itself be a dict of outcomes, or a dict
+            # carrying a status flag alongside an "outcomes" sub-map.
+            mkt_susp = _is_suspended_flag(outs if isinstance(outs, dict) else None)
+            outcome_map = outs
+            if isinstance(outs, dict) and isinstance(outs.get("outcomes"), dict):
+                outcome_map = outs.get("outcomes")
+            for oid, od in (outcome_map or {}).items():
+                if not isinstance(od, dict):
+                    continue
+                val = _to_float(od.get("k"))
+                osusp = _is_suspended_flag(od)
+                # No usable price or explicitly flagged -> suspended outcome.
+                suspended = bool(osusp) or (mkt_susp is True) or val is None or val < 1.0
+                # When suspended without a price, fall back to a neutral value so
+                # the ingest still has a numeric odd to display as locked.
+                out_val = round(val, 3) if (val is not None and val >= 1.0) else None
+                oname = resolve_name(omap.get(str(oid)) or str(oid), vals, home, away)[:80]
+                key = (mname, oname, line)
+                if key in seen:
+                    continue
+                seen.add(key)
+                odds.append({
+                    "market": mname, "outcome": oname,
+                    "value": out_val if out_val is not None else 1.0,
+                    "param": line,
+                    "lay": None,
+                    "volume": _to_float(od.get("volume")),
+                    "suspended": suspended,
+                })
+    return odds
+
+
 def build_matches(events, sports, tours, markets, status):
     out = []
     for ev in events.values():
         d = ev.get("desc", {})
-        comps = d.get("competitors", [])
-        if d.get("type") != "match" or len(comps) != 2:
-            continue  # skip outrights / stages / single-competitor
-        home = (comps[0] or {}).get("name")
-        away = (comps[1] or {}).get("name")
-        if not home or not away:
-            continue
+        comps = d.get("competitors", []) or []
         sport = (sports.get(str(d.get("sport"))) or {}).get("name") or "Other"
         league = (tours.get(str(d.get("tournament"))) or {}).get("name")
+        scheduled = d.get("scheduled")  # ISO start time (pass through to "time")
+        ev_susp = _event_suspended(ev, d)
 
-        # Live score + clock (powers auto-results: the last live score before the
-        # match leaves the feed is its final score).
-        hs = as_ = None
-        match_time = None
-        if status == "live":
-            sc = ev.get("score") or {}
-            hs, as_ = _to_int(sc.get("home_score")), _to_int(sc.get("away_score"))
-            match_time = ((ev.get("state") or {}).get("clock") or {}).get("match_time")
+        is_match = d.get("type") == "match" and len(comps) == 2 \
+            and (comps[0] or {}).get("name") and (comps[1] or {}).get("name")
 
-        odds = []
-        seen = set()
-        for mtid, specs in (ev.get("markets") or {}).items():
-            desc = markets.get(str(mtid), {})
-            raw_mname = desc.get("name") or f"Market {mtid}"
-            omap = desc.get("outcomes", {})
-            for spec, outs in (specs or {}).items():
-                vals = spec_values(spec)
-                line = spec_line(spec)
-                mname = resolve_name(raw_mname, vals, home, away)[:60]
-                for oid, od in (outs or {}).items():
-                    try:
-                        val = float(od.get("k"))
-                    except (TypeError, ValueError):
-                        continue
-                    if val < 1.0:
-                        continue
-                    oname = resolve_name(omap.get(str(oid)) or str(oid), vals, home, away)[:80]
-                    key = (mname, oname, line)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    odds.append({"market": mname, "outcome": oname,
-                                 "value": round(val, 3), "param": line})
-        if not odds:
-            continue
-        out.append({
-            "ext_id": None,  # let the backend hash provider+sport+home+away (JS-safe id)
-            "sport": sport, "league": league,
-            "home": home, "away": away, "status": status,
-            "home_score": hs, "away_score": as_,
-            "time": match_time, "period": None, "markets": odds,
-            "home_logo": None, "away_logo": None, "sport_logo": None, "league_logo": None,
-        })
+        if is_match:
+            home = (comps[0] or {}).get("name")
+            away = (comps[1] or {}).get("name")
+
+            # Live score + clock (powers auto-results: the last live score before
+            # the match leaves the feed is its final score).
+            hs = as_ = None
+            match_time = None
+            if status == "live":
+                sc = ev.get("score") or {}
+                hs, as_ = _to_int(sc.get("home_score")), _to_int(sc.get("away_score"))
+                match_time = ((ev.get("state") or {}).get("clock") or {}).get("match_time")
+
+            odds = _collect_odds(ev, markets, home, away)
+            if not odds:
+                continue
+            out.append({
+                "ext_id": None,  # backend hashes provider+sport+home+away (JS-safe id)
+                "sport": sport, "league": league,
+                "home": home, "away": away, "status": status,
+                "home_score": hs, "away_score": as_,
+                "time": match_time or scheduled, "period": None,
+                "suspended": ev_susp,
+                "markets": odds,
+                "home_logo": None, "away_logo": None, "sport_logo": None, "league_logo": None,
+            })
+        else:
+            # OUTRIGHT / tournament / single-competitor: model as a single-entity
+            # event whose "home" is the event/tournament name; each competitor or
+            # selection becomes an odds outcome under its market.
+            ev_name = d.get("name") or league or sport
+            # Competitor names give us {$competitor1/2} placeholders; outrights
+            # rarely use them, but pass through harmlessly.
+            home = (comps[0] or {}).get("name") if comps else ""
+            away = (comps[1] or {}).get("name") if len(comps) > 1 else ""
+            odds = _collect_odds(ev, markets, home or "", away or "")
+            if not odds:
+                continue  # skip truly empty events
+            out.append({
+                "ext_id": None,
+                "sport": sport, "league": league,
+                "home": ev_name, "away": "", "status": status,
+                "home_score": None, "away_score": None,
+                "time": scheduled, "period": None,
+                "suspended": ev_susp,
+                "markets": odds,
+                "home_logo": None, "away_logo": None, "sport_logo": None, "league_logo": None,
+            })
     return out
 
 

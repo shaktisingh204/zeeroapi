@@ -101,6 +101,8 @@ pub struct MatchView {
     pub match_time: Option<String>,
     pub result: Option<String>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// Exchange/in-play: the whole event's markets are locked (padlock).
+    pub suspended: bool,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -112,8 +114,16 @@ pub struct Odd {
     pub type_code: Option<i64>,
     pub market: String,
     pub outcome: String,
+    /// Primary price. For a sportsbook this is the decimal odd; for an exchange
+    /// it is the best BACK price.
     pub value: Decimal,
+    /// Exchange best LAY price (null for sportsbook providers).
+    pub lay: Option<Decimal>,
+    /// Exchange matched volume / size at this price (null for sportsbooks).
+    pub volume: Option<Decimal>,
     pub param: Option<Decimal>,
+    /// This specific line/runner is suspended or blocked.
+    pub suspended: bool,
     pub source: String,
     pub provider: String,
     pub updated_at: DateTime<Utc>,

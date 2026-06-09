@@ -21,7 +21,10 @@ Discovery note: 1win also exposes `api-gateway.top-parser.com` with
 `POST /matches/get-many` (match listings, NO odds) and a Socket.IO push stream
 (`wss://api-gateway.top-parser.com/push-server-v2/`) carrying `match-odds-snapshot`
 deltas for both live & prematch. The `lp-feed` REST snapshot is the simplest
-odds-complete source for LIVE matches, so the scraper is built around it.
+odds-complete source, so the scraper is built around it. Both LIVE and prematch
+matches in the feed are ingested (status "live"/"prematch"); odds flagged
+`blocked` are emitted as suspended (locked) lines rather than dropped, and a
+match whose every odd is blocked is marked suspended at the match level.
 See probe_1win.py for the full network capture used to find these.
 
     python scrape_1win.py --dry-run     # extract + print, no POST
@@ -92,6 +95,23 @@ def _line(value):
         return None
 
 
+# JS Number.MAX_SAFE_INTEGER — the backend stores ext_id as a JS-safe integer.
+_JS_SAFE_MAX = 9007199254740991
+
+
+def _ext_id(m):
+    """The feed's numeric match/event id, as a JS-safe integer, else None.
+
+    Prefer the per-match id (matchId), fall back to eventId. Any id that is
+    not a positive integer within the JS-safe range is rejected so we never
+    send a value the backend (or a JS client) would round/lose."""
+    for key in ("matchId", "eventId", "id"):
+        n = _to_int(m.get(key))
+        if n is not None and 0 < n <= _JS_SAFE_MAX:
+            return n
+    return None
+
+
 def build_match(sport_name, m):
     """Map one 1win feed match → an ingest match dict (or None if unusable)."""
     home = (m.get("homeTeamName") or "").strip()
@@ -112,22 +132,34 @@ def build_match(sport_name, m):
 
     status_text = (m.get("status") or "").strip() or None
     # service is LIVE for the live page feed; map to our status vocabulary.
+    # Prematch matches carry the same odds shape, so they are ingested too.
     is_live = (m.get("service") or "").upper() == "LIVE"
     status = "live" if is_live else "prematch"
 
+    # Scheduled start time (epoch seconds/ms or ISO string) for prematch rows.
+    start = m.get("dateOfMatch") or m.get("startTime") or m.get("date")
+
     odds = []
     seen = set()
+    n_blocked = 0
     for g in m.get("oddGroups") or []:
         gname = (g.get("name") or "Market")[:60]
         for o in g.get("odds") or []:
-            if o.get("blocked"):
-                continue
             try:
                 val = float(o.get("coefficient"))
             except (TypeError, ValueError):
-                continue
-            if val < 1.0:
-                continue
+                val = None
+            blocked = bool(o.get("blocked"))
+            # Blocked odds are emitted as suspended (locked) lines so the API
+            # can report them. Their value is the coefficient if it's a real
+            # odd (>=1.0), else 0 to signal "no priceable line".
+            if blocked:
+                value = round(val, 3) if (val is not None and val >= 1.0) else 0
+                n_blocked += 1
+            else:
+                if val is None or val < 1.0:
+                    continue
+                value = round(val, 3)
             line = _line(o.get("value"))
             oname = (o.get("name") or o.get("outCome") or "").strip()
             if not oname:
@@ -137,25 +169,39 @@ def build_match(sport_name, m):
             if key in seen:
                 continue
             seen.add(key)
+            try:
+                vol = float(o.get("volume"))
+            except (TypeError, ValueError):
+                vol = None
             odds.append({
                 "market": gname,
                 "outcome": oname,
-                "value": round(val, 3),
+                "value": value,
                 "param": line,
+                "suspended": blocked,
+                "lay": None,
+                "volume": vol,
             })
     if not odds:
         return None
 
+    # If every emitted odd is blocked, the whole match is suspended.
+    match_suspended = n_blocked == len(odds)
+
+    # Prefer the scheduled start time for prematch; live keeps period/clock text.
+    time_field = status_text if is_live else (start or status_text)
+
     return {
-        "ext_id": None,  # backend hashes provider+sport+home+away (JS-safe id)
+        "ext_id": _ext_id(m),  # feed's numeric id when present, else backend hashes
         "sport": sport_name or "Other",
         "league": league,
         "home": home,
         "away": away,
         "status": status,
+        "suspended": match_suspended,
         "home_score": hs,
         "away_score": as_,
-        "time": status_text,  # human period/clock text ("2nd Half", "1st innings")
+        "time": time_field,  # live: period/clock text; prematch: scheduled start
         "period": status_text,
         "home_logo": None,
         "away_logo": None,
@@ -235,25 +281,37 @@ def one_pass(client, dry_run):
     total_odds = sum(len(m["markets"]) for m in matches)
     tree_leagues = sum(len(s["leagues"]) for s in tree)
 
+    live = [m for m in matches if m["status"] == "live"]
+    prematch = [m for m in matches if m["status"] != "live"]
+    susp_matches = sum(1 for m in matches if m["suspended"])
+    susp_odds = sum(1 for m in matches for o in m["markets"] if o["suspended"])
+
     if dry_run:
-        print(f"[dry-run] extracted {len(matches)} matches, {total_odds} odds "
+        print(f"[dry-run] extracted {len(matches)} matches "
+              f"({len(live)} live / {len(prematch)} prematch), {total_odds} odds "
+              f"({susp_odds} suspended in {susp_matches} fully-locked matches) "
               f"(feed sports: {len(doc.get('feed') or [])}); "
               f"sports-tree: {len(tree)} sports, {tree_leagues} leagues")
         for m in matches[:3]:
             ex = m["markets"][:3]
             print(f"  · [{m['sport']}] {m['home']} vs {m['away']} "
                   f"({m['league']}) [{m['status']}/{m['time']}] "
+                  f"id={m['ext_id']} susp={m['suspended']} "
                   f"score={m['home_score']}-{m['away_score']} "
                   f"{len(m['markets'])} odds")
             for o in ex:
                 print(f"        {o['market']} / {o['outcome']} = {o['value']}"
-                      + (f" (line {o['param']})" if o['param'] is not None else ""))
+                      + (f" (line {o['param']})" if o['param'] is not None else "")
+                      + (" [SUSPENDED]" if o['suspended'] else ""))
         return len(matches), total_odds
 
-    m, o = post_chunks(client, "1win-live", matches)
+    lm, lo = post_chunks(client, "1win-live", live)
+    pm, po = post_chunks(client, "1win-prematch", prematch)
     sp, lg = post_sidebar(client, tree)
-    print(f"[live] {len(matches)} matches extracted → {m} upserted, {o} odds; "
-          f"sidebar {sp} sports / {lg} leagues")
+    m, o = lm + pm, lo + po
+    print(f"[1win] {len(matches)} matches extracted "
+          f"({len(live)} live / {len(prematch)} prematch) → {m} upserted, {o} odds "
+          f"({susp_odds} suspended); sidebar {sp} sports / {lg} leagues")
     return m, o
 
 

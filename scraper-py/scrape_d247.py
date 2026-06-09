@@ -81,15 +81,19 @@ EXTRACT_JS = r"""
         // Column labels (1 / X / 2) from the mobile label divs.
         const labels = [...row.querySelectorAll('.bet-nation-odd.d-xl-none b')]
             .map(b => clean(b.innerText));
-        // Real odds columns = those carrying a back price.
+        // Odds columns = those carrying a back price OR currently locked (so a
+        // suspended row still yields its column shape instead of vanishing).
+        const lockSel = '.fa-lock, i.icon-lock, [class*="lock" i], [class*="suspend" i]';
         const cols = [...row.querySelectorAll('.bet-nation-odd')]
-            .filter(c => c.querySelector('.back .bet-odd'));
-        const backs = cols.map(c => {
-            const b = c.querySelector('.back .bet-odd b');
-            return b ? num(b.innerText) : null;
-        });
+            .filter(c => c.querySelector('.back .bet-odd') || c.querySelector('.lay .bet-odd') || c.querySelector(lockSel));
+        const backs = cols.map(c => { const b = c.querySelector('.back .bet-odd b'); return b ? num(b.innerText) : null; });
+        const lays  = cols.map(c => { const b = c.querySelector('.lay .bet-odd b');  return b ? num(b.innerText) : null; });
+        // A row is suspended when it shows a padlock, or every price cell is locked/empty.
+        const rowLock = !!row.querySelector(lockSel);
+        const allDead = cols.length > 0 && cols.every(c => !c.querySelector('.back .bet-odd b') && !c.querySelector('.lay .bet-odd b'));
+        const susp = rowLock || allDead;
         const live = !!row.querySelector('.icon-tv');
-        out.push({ href, name, date, labels, backs, live });
+        out.push({ href, name, date, labels, backs, lays, susp, live });
     });
     return out;
 }
@@ -149,9 +153,17 @@ EXTRACT_DETAIL_JS = r"""
     const num = s => { const n = parseFloat(clean(s).replace(',', '.')); return isNaN(n) ? null : n; };
     const header = document.querySelector('.game-header');
     const score = header ? clean(header.innerText).slice(0, 200) : null;
+    const lockSel = '.fa-lock, i.icon-lock, [class*="lock" i], [class*="suspend" i], [class*="status" i]';
+    const isLocked = el => {
+        if (!el) return false;
+        if (el.querySelector(lockSel)) return true;
+        const t = (el.innerText || '').toUpperCase();
+        return /\b(SUSPENDED|BALL RUNNING|CLOSED|LOCKED)\b/.test(t);
+    };
     const markets = [];
     document.querySelectorAll('.game-market').forEach(gm => {
         const title = clean((gm.querySelector('.market-title span') || {}).innerText || '') || 'Market';
+        const mSusp = isLocked(gm.querySelector('.market-title')) || isLocked(gm.querySelector('.market-header'));
         const rows = [];
         gm.querySelectorAll('.market-body .market-row').forEach(r => {
             const name = clean((r.querySelector('.market-nation-name') || {}).innerText || '');
@@ -159,11 +171,13 @@ EXTRACT_DETAIL_JS = r"""
             const back = (r.querySelector('.market-odd-box.back .market-odd') || {}).innerText;
             const lay = (r.querySelector('.market-odd-box.lay .market-odd') || {}).innerText;
             const vol = (r.querySelector('.market-odd-box.back .market-volume') || {}).innerText;
-            rows.push({ name: name.slice(0, 80), back: num(back), lay: num(lay), line: num(vol) });
+            const rSusp = mSusp || isLocked(r) || (!num(back) && !num(lay));
+            rows.push({ name: name.slice(0, 80), back: num(back), lay: num(lay), vol: num(vol), suspended: !!rSusp });
         });
-        if (rows.length) markets.push({ title: title.slice(0, 60), rows });
+        if (rows.length) markets.push({ title: title.slice(0, 60), suspended: !!mSusp, rows });
     });
-    return { score, markets };
+    const allSusp = markets.length > 0 && markets.every(m => m.suspended || m.rows.every(r => r.suspended));
+    return { score, markets, suspended: allSusp };
 }
 """
 
@@ -184,7 +198,12 @@ def split_teams(name):
 
 
 def detail_to_odds(detail):
-    """Map a detail page's market tree to ingest odds rows."""
+    """Map a detail page's market tree to ingest odds rows.
+
+    Each runner becomes ONE exchange-native odd: value = best back, plus the
+    best `lay`, matched `volume`, and a per-runner `suspended` flag. Suspended
+    runners are still emitted (with whatever price was last shown) so the API
+    can report "locked" rather than silently dropping the line."""
     out = []
     for m in detail.get("markets", []):
         title = m.get("title") or "Market"
@@ -193,20 +212,28 @@ def detail_to_odds(detail):
             base = "Match Odds"
         elif "bookmaker" in tl:
             base = "Bookmaker"
-        elif tl in ("normal", "winner", "tied match", "completed match"):
-            base = title
         else:
-            base = title  # fancy / session / oddeven / over-runs
+            base = title  # winner / tied match / fancy / session / oddeven / over-runs
+        m_susp = bool(m.get("suspended"))
         for r in m.get("rows", []):
             name = r.get("name")
             if not name:
                 continue
-            back, lay, line = r.get("back"), r.get("lay"), r.get("line")
-            param = line if (line is not None and abs(line) < 9_999_999) else None
-            if back is not None and back >= 1.0:
-                out.append({"market": base[:60], "outcome": name, "value": round(float(back), 3), "param": param})
-            if lay is not None and lay >= 1.0:
-                out.append({"market": (base + " (Lay)")[:60], "outcome": name, "value": round(float(lay), 3), "param": param})
+            back, lay, vol = r.get("back"), r.get("lay"), r.get("vol")
+            suspended = bool(r.get("suspended")) or m_susp
+            # Primary price: back if present, else lay (so lay-only lines survive).
+            value = back if (back is not None and back >= 1.0) else (lay if (lay is not None and lay >= 1.0) else None)
+            if value is None and not suspended:
+                continue  # no usable price and not flagged locked → nothing to record
+            out.append({
+                "market": base[:60],
+                "outcome": name,
+                "value": round(float(value), 3) if value is not None else 0,
+                "lay": round(float(lay), 3) if (lay is not None and lay >= 1.0) else None,
+                "volume": round(float(vol), 2) if (vol is not None and abs(vol) < 9_999_999_999) else None,
+                "param": None,
+                "suspended": suspended,
+            })
     return out
 
 
@@ -214,35 +241,74 @@ def build_match(card, sport):
     name = re.sub(r"\s*/\s*$", "", card.get("name") or "").strip()
     teams = split_teams(name)
     if not teams:
-        return None  # not a two-team match (tournament / outright / race) — skip
+        # Not "Team v Team": a race, outright/winner market or tournament.
+        # Don't drop it — model it as a single-entity event (runners arrive via
+        # the detail page during enrichment).
+        return build_event(card, sport, name)
     home, away = teams
     if not home or not away:
         return None
 
+    susp = bool(card.get("susp"))
     labels = card.get("labels") or []
     backs = card.get("backs") or []
+    lays = card.get("lays") or []
     markets = []
     for i, b in enumerate(backs):
-        if b is None or b < 1.0:
-            continue
         label = labels[i] if i < len(labels) else None
         outcome = OUTCOME.get(label)
         if not outcome:
             continue
-        markets.append({"market": "Match Result", "outcome": outcome,
-                        "value": round(float(b), 3), "param": None})
+        lay = lays[i] if i < len(lays) else None
+        if (b is None or b < 1.0) and (lay is None or lay < 1.0) and not susp:
+            continue
+        markets.append({
+            "market": "Match Result", "outcome": outcome,
+            "value": round(float(b), 3) if (b is not None and b >= 1.0) else 0,
+            "lay": round(float(lay), 3) if (lay is not None and lay >= 1.0) else None,
+            "volume": None, "param": None, "suspended": susp,
+        })
 
-    has_odds = len(markets) > 0
-    status = "live" if (card.get("live") and has_odds) else "prematch"
+    has_odds = any(o["value"] >= 1.0 for o in markets)
+    status = "live" if (card.get("live") and (has_odds or susp)) else "prematch"
     href = card.get("href") or ""
     return {
         "ext_id": event_id_from_href(href),  # stable id shared with the detail page
         "sport": sport, "league": None,
         "home": home, "away": away, "status": status,
         "home_score": None, "away_score": None,
-        "time": card.get("date"), "period": None, "markets": markets,
+        "time": card.get("date"), "period": None, "suspended": susp, "markets": markets,
         "home_logo": None, "away_logo": None, "sport_logo": None, "league_logo": None,
         "_href": href,  # internal: used for detail navigation (ignored by ingest)
+    }
+
+
+# Race / outright detail hrefs (per-event pages that carry the runner list).
+EVENT_HREF_RE = re.compile(r"/(game-details|race|market|sport-event|event)/\d+")
+
+
+def build_event(card, sport, name):
+    """Single-entity event (Horse/Greyhound race, outright 'Winner' market,
+    tournament). The list row only gives the event name; the runners and their
+    back/lay prices are scraped from the detail page during enrichment. We still
+    emit the fixture now so it appears in the API immediately, with its suspended
+    flag, and model it as `home = event name, away = ''` so each runner can be an
+    outcome under a 'Winner' market."""
+    name = (name or "").strip()
+    href = card.get("href") or ""
+    if not name or len(name) > 90 or not EVENT_HREF_RE.search(href):
+        return None  # section header / nav crumb / non-event row — skip
+    susp = bool(card.get("susp"))
+    status = "live" if card.get("live") else "prematch"
+    return {
+        "ext_id": event_id_from_href(href),
+        "sport": sport, "league": None,
+        "home": name, "away": "", "status": status,
+        "home_score": None, "away_score": None,
+        "time": card.get("date"), "period": None, "suspended": susp, "markets": [],
+        "home_logo": None, "away_logo": None, "sport_logo": None, "league_logo": None,
+        "_href": href,
+        "_event": True,  # internal: mark for outright-style detail merge
     }
 
 
@@ -413,6 +479,9 @@ def merge_detail(m, detail):
     if detail.get("score"):
         m["time"] = detail["score"][:160]
         m["period"] = "live"
+    # Carry the event-level suspended flag from the detail page.
+    if detail.get("suspended"):
+        m["suspended"] = True
     seen = {(o["market"], o["outcome"]) for o in m["markets"]}
     added = 0
     for o in detail_to_odds(detail):
@@ -421,7 +490,7 @@ def merge_detail(m, detail):
             m["markets"].append(o)
             seen.add(key)
             added += 1
-    return added > 0 or bool(detail.get("score"))
+    return added > 0 or bool(detail.get("score")) or bool(detail.get("suspended"))
 
 
 async def post_snapshot(client, source, matches):
@@ -490,12 +559,18 @@ async def scrape_sport(client, page, idx, sport):
     for c in cards:
         m = build_match(c, sport)
         if m:
-            seen[(m["home"], m["away"])] = m
+            # Key by href when present (events share an empty away team).
+            key = m.get("_href") or (m["home"], m["away"])
+            seen[key] = m
     matches = list(seen.values())
     if not matches:
-        print(f"  [{sport}] no team-vs-team matches")
+        print(f"  [{sport}] no matches/events")
         return 0, 0, []
-    live = [m for m in matches if m["status"] == "live" and m.get("_href")]
+    # Targets to enrich with detail-page markets: live matches, plus any
+    # single-entity event (race/outright) whose runners only exist on the
+    # detail page. Both must carry a detail href.
+    live = [m for m in matches
+            if m.get("_href") and (m["status"] == "live" or m.get("_event"))]
     mm, oo = await post_snapshot(client, f"d247-{sport.lower().replace(' ', '-')}", matches)
     print(f"  [{sport}] {len(matches)} matches → {mm} upserted, {oo} odds ({len(live)} live)")
     return mm, oo, live
@@ -506,8 +581,9 @@ async def enrich_detail(client, page, idx, sport, m):
     score, POST the enriched match. Re-opens the sport tab to expose the link,
     then returns home so the next enrichment can navigate cleanly."""
     href = m.get("_href")
-    # Only true match-detail pages have the full market tree (skip casino/virtual).
-    if not href or not re.search(r"/game-details/\d+/\d+", href):
+    # Real event-detail pages carry the full market tree (skip casino/virtual).
+    # Covers match details (/game-details/{etid}/{id}) and race/outright pages.
+    if not href or not (re.search(r"/game-details/\d+/\d+", href) or EVENT_HREF_RE.search(href)):
         return False
     if not await open_tab(page, idx):  # full open so the row link is rendered/positioned
         return False

@@ -68,6 +68,9 @@ pub struct IngestMatch {
     pub away_logo: Option<String>,
     pub sport_logo: Option<String>,
     pub league_logo: Option<String>,
+    /// Exchange/in-play: the whole event is locked (all markets padlocked).
+    #[serde(default)]
+    pub suspended: bool,
     #[serde(default)]
     pub markets: Vec<IngestOdd>,
 }
@@ -80,8 +83,18 @@ fn default_status() -> String {
 pub struct IngestOdd {
     pub market: String,
     pub outcome: String,
+    /// Primary price (sportsbook decimal odd, or exchange best BACK price).
     pub value: Decimal,
+    /// Exchange best LAY price (omit for sportsbooks).
+    #[serde(default)]
+    pub lay: Option<Decimal>,
+    /// Exchange matched volume / size (omit for sportsbooks).
+    #[serde(default)]
+    pub volume: Option<Decimal>,
     pub param: Option<Decimal>,
+    /// This line/runner is suspended or blocked.
+    #[serde(default)]
+    pub suspended: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -209,14 +222,15 @@ async fn snapshot(
         sqlx::query(
             "INSERT INTO matches
                 (id, sport_id, league_id, home_team, away_team, home_logo, away_logo, status,
-                 home_score, away_score, period, match_time, source, provider, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+                 home_score, away_score, period, match_time, suspended, source, provider, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
              ON CONFLICT (id) DO UPDATE SET
                 league_id = EXCLUDED.league_id, status = EXCLUDED.status,
                 home_logo = COALESCE(EXCLUDED.home_logo, matches.home_logo),
                 away_logo = COALESCE(EXCLUDED.away_logo, matches.away_logo),
                 home_score = EXCLUDED.home_score, away_score = EXCLUDED.away_score,
                 period = EXCLUDED.period, match_time = EXCLUDED.match_time,
+                suspended = EXCLUDED.suspended,
                 source = EXCLUDED.source, updated_at = now()",
         )
         .bind(match_id)
@@ -231,6 +245,7 @@ async fn snapshot(
         .bind(m.away_score)
         .bind(&m.period)
         .bind(&m.time)
+        .bind(m.suspended)
         .bind(&snap.source)
         .bind(provider)
         .execute(&mut *tx)
@@ -260,16 +275,20 @@ async fn snapshot(
             .await?;
 
             sqlx::query(
-                "INSERT INTO odds (match_id, market, outcome, value, param, source, provider, updated_at)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7, now())
+                "INSERT INTO odds (match_id, market, outcome, value, lay, volume, param, suspended, source, provider, updated_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
                  ON CONFLICT (match_id, market, outcome, (COALESCE(param, 0))) DO UPDATE
-                 SET value = EXCLUDED.value, source = EXCLUDED.source, updated_at = now()",
+                 SET value = EXCLUDED.value, lay = EXCLUDED.lay, volume = EXCLUDED.volume,
+                     suspended = EXCLUDED.suspended, source = EXCLUDED.source, updated_at = now()",
             )
             .bind(match_id)
             .bind(&o.market)
             .bind(&o.outcome)
             .bind(o.value)
+            .bind(o.lay)
+            .bind(o.volume)
             .bind(o.param)
+            .bind(o.suspended)
             .bind(&snap.source)
             .bind(provider)
             .execute(&mut *tx)

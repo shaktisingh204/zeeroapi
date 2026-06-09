@@ -175,6 +175,27 @@
   .lp-acc { transition: none; }
 }
 
+/* ---------- Auth pages (light, split-screen) ---------- */
+/* Emil-grade entrance: strong ease-out curve, never from scale(0). */
+@keyframes auth-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+.auth-in {
+  opacity: 0;
+  animation: auth-in 0.6s cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+/* Error message: fade + lift + unblur so the swap reads as one motion. */
+@keyframes auth-error-in {
+  from { opacity: 0; transform: translateY(-4px); filter: blur(3px); }
+  to   { opacity: 1; transform: none; filter: blur(0); }
+}
+.auth-error-in { animation: auth-error-in 0.22s cubic-bezier(0.23, 1, 0.32, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-in, .auth-error-in { animation: none; opacity: 1; transform: none; filter: none; }
+}
+
 .live-dot {
   width: 8px;
   height: 8px;
