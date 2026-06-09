@@ -289,7 +289,7 @@ const ENDPOINTS: Endpoint[] = [
     id: "ep-match",
     display: "/v1/{provider}/matches/{id}",
     template: "/{provider}/matches/{id}",
-    summary: "Full detail for one match or event, including every market/odd.",
+    summary: "Full detail for one match or event, including every market/odd. Also available as /v1/{provider}/matchdetails/{id}.",
     capability: "matches",
     params: [
       { name: "provider", loc: "path", required: true, desc: "Provider slug." },
@@ -352,6 +352,29 @@ const ENDPOINTS: Endpoint[] = [
   }
 ]`
         : matchListEx(slug, false),
+  },
+  {
+    id: "ep-headermatches",
+    display: "/v1/{provider}/headermatches",
+    template: "/{provider}/headermatches",
+    summary: "Matches shown in the provider's header strip (the header ticker, distinct from the main list).",
+    capability: "matches",
+    params: [{ name: "provider", loc: "path", required: true, desc: "Provider slug." }],
+    response: (slug) => `[
+  {
+    "id": 884213,
+    "provider": "${slug}",
+    "sport_name": "Cricket",
+    "league_name": "Indian Premier League",
+    "home_team": "Mumbai Indians",
+    "away_team": "Chennai Super Kings",
+    "status": "prematch",
+    "suspended": false,
+    "featured": false,
+    "header": true,
+    "updated_at": "2026-06-10T09:00:00Z"
+  }
+]`,
   },
   {
     id: "ep-results",
@@ -421,6 +444,7 @@ const SCHEMAS: Schema[] = [
       { name: "match_time", type: "string | null", desc: "Clock / live state, e.g. 63:21 or a cricket scoreline." },
       { name: "suspended", type: "boolean", desc: "Event is locked in-play (all markets padlocked)." },
       { name: "featured", type: "boolean", desc: "Promoted in the provider's featured / highlights strip." },
+      { name: "header", type: "boolean", desc: "Listed in the provider's header match strip." },
       { name: "result", type: "string | null", desc: "Derived winner once finished (W1 / Draw / W2)." },
       { name: "updated_at", type: "timestamp", desc: "Last time this row changed." },
     ],

@@ -105,6 +105,8 @@ pub struct MatchView {
     pub suspended: bool,
     /// Promoted in the provider's featured/highlights strip.
     pub featured: bool,
+    /// Listed in the provider's header match strip.
+    pub header: bool,
     pub updated_at: DateTime<Utc>,
 }
 

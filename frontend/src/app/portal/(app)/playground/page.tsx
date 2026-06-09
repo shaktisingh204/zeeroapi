@@ -7,7 +7,7 @@ import { PageHeader, Spinner, EmptyState } from "@/components/ui";
 
 const KEY_STORAGE = "zeroapi_pg_key";
 
-const ENDPOINTS = ["live", "results", "sports", "leagues", "matches", "providers"];
+const ENDPOINTS = ["sports", "matches", "sidebar", "leagues", "live", "featured", "headermatches", "results", "providers"];
 
 interface Result {
   line: string;

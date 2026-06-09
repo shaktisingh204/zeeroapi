@@ -9,12 +9,16 @@ import { API_V1 as V1_URL, DOCS_URL as SWAGGER_URL } from "@/lib/config";
 
 const ENDPOINTS: { method: string; path: string; desc: string }[] = [
   { method: "GET", path: "/v1/providers", desc: "List available data providers." },
-  { method: "GET", path: "/v1/{provider}/sports", desc: "List sports with active matches." },
+  { method: "GET", path: "/v1/{provider}/sports", desc: "List sports with their ids and match counts." },
+  { method: "GET", path: "/v1/{provider}/matches", desc: "List matches/events (status, sport_id, league_id, search, limit)." },
+  { method: "GET", path: "/v1/{provider}/matches/{id}", desc: "Full detail + all odds for one match (alias: /matchdetails/{id})." },
   { method: "GET", path: "/v1/{provider}/leagues", desc: "List leagues, filterable by sport_id." },
-  { method: "GET", path: "/v1/{provider}/matches", desc: "List matches (status, sport_id, search, limit)." },
-  { method: "GET", path: "/v1/{provider}/matches/{id}", desc: "Full detail + odds for one match." },
+  { method: "GET", path: "/v1/{provider}/sidebar", desc: "Full sports tree with nested leagues." },
   { method: "GET", path: "/v1/{provider}/live", desc: "Currently live matches with scores." },
-  { method: "GET", path: "/v1/{provider}/odds/{match_id}", desc: "All odds/markets for a match." },
+  { method: "GET", path: "/v1/{provider}/featured", desc: "Featured / highlighted events (promoted strip)." },
+  { method: "GET", path: "/v1/{provider}/headermatches", desc: "Matches in the provider's header strip." },
+  { method: "GET", path: "/v1/{provider}/results", desc: "Recently finished matches with derived winner." },
+  { method: "GET", path: "/v1/{provider}/odds/{match_id}", desc: "All odds/markets for a match (exchanges add lay + volume + suspended)." },
 ];
 
 // Both forms work — provider in the path (canonical) or as a ?provider= query param.

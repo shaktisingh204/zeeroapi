@@ -21,24 +21,20 @@ pub fn router() -> Router<AppState> {
         .route("/openapi.json", get(openapi))
         .route("/docs", get(docs))
         .route("/providers", get(providers))
-        // Canonical: provider in the path — /api/v1/{provider}/live
-        .route("/:provider/sports", get(sports))
-        .route("/:provider/leagues", get(leagues))
-        .route("/:provider/sidebar", get(sidebar))
-        .route("/:provider/matches", get(matches))
-        .route("/:provider/matches/:id", get(match_detail))
-        .route("/:provider/live", get(live))
-        .route("/:provider/featured", get(featured))
-        .route("/:provider/results", get(results))
-        .route("/:provider/odds/:match_id", get(match_odds))
+        // Canonical: each provider has its OWN module + endpoints, mounted under
+        // its slug (see src/routes/providers/<slug>.rs). e.g. /api/v1/melbet/live,
+        // /api/v1/diamondexch/headermatches.
+        .merge(crate::routes::providers::router())
         // Forgiving alternative: provider as a query param — /api/v1/live?provider=melbet
         .route("/sports", get(sports_q))
         .route("/leagues", get(leagues_q))
         .route("/sidebar", get(sidebar_q))
         .route("/matches", get(matches_q))
         .route("/matches/:id", get(match_detail_q))
+        .route("/matchdetails/:id", get(match_detail_q))
         .route("/live", get(live_q))
         .route("/featured", get(featured_q))
+        .route("/headermatches", get(header_matches_q))
         .route("/results", get(results_q))
         .route("/odds/:match_id", get(match_odds_q))
         // Helpful JSON for anything else under /api/v1/* (instead of an empty 404).
@@ -137,7 +133,7 @@ async fn providers(
 }
 
 // ---- sports ----
-async fn sports_core(state: &AppState, client: &ApiClient, provider: &str)
+pub(crate) async fn sports_core(state: &AppState, client: &ApiClient, provider: &str)
     -> AppResult<(HeaderMap, Json<Vec<Sport>>)> {
     require_capability(state, provider, "sports").await?;
     let rows: Vec<Sport> = sqlx::query_as(
@@ -148,17 +144,13 @@ async fn sports_core(state: &AppState, client: &ApiClient, provider: &str)
     .await?;
     Ok((rate_headers(client), Json(rows)))
 }
-async fn sports(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
-    -> AppResult<(HeaderMap, Json<Vec<Sport>>)> {
-    sports_core(&state, &client, &provider).await
-}
 async fn sports_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
     -> AppResult<(HeaderMap, Json<Vec<Sport>>)> {
     sports_core(&state, &client, &need_provider(q.provider)?).await
 }
 
 // ---- leagues ----
-async fn leagues_core(state: &AppState, client: &ApiClient, provider: &str, sport_id: Option<i64>)
+pub(crate) async fn leagues_core(state: &AppState, client: &ApiClient, provider: &str, sport_id: Option<i64>)
     -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
     require_capability(state, provider, "leagues").await?;
     let rows: Vec<(i64, i64, String, String, Option<String>, i64)> = sqlx::query_as(
@@ -181,17 +173,13 @@ async fn leagues_core(state: &AppState, client: &ApiClient, provider: &str, spor
         .collect();
     Ok((rate_headers(client), Json(out)))
 }
-async fn leagues(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>, Query(q): Query<ListQuery>)
-    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
-    leagues_core(&state, &client, &provider, q.sport_id).await
-}
 async fn leagues_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ListQuery>)
     -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
     leagues_core(&state, &client, &need_provider(q.provider)?, q.sport_id).await
 }
 
 // ---- sidebar (full sports tree: sports each with their nested leagues) ----
-async fn sidebar_core(state: &AppState, client: &ApiClient, provider: &str)
+pub(crate) async fn sidebar_core(state: &AppState, client: &ApiClient, provider: &str)
     -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
     require_capability(state, provider, "sports").await?;
     let sports: Vec<(i64, String, String, i32, Option<String>)> = sqlx::query_as(
@@ -229,10 +217,6 @@ async fn sidebar_core(state: &AppState, client: &ApiClient, provider: &str)
         .collect();
     Ok((rate_headers(client), Json(out)))
 }
-async fn sidebar(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
-    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
-    sidebar_core(&state, &client, &provider).await
-}
 async fn sidebar_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
     -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
     sidebar_core(&state, &client, &need_provider(q.provider)?).await
@@ -242,11 +226,11 @@ const MATCH_SELECT: &str = "
     SELECT m.id, m.provider, m.sport_id, s.name AS sport_name, m.league_id, l.name AS league_name,
            m.home_team, m.away_team, m.home_logo, m.away_logo, m.start_time, m.status,
            m.home_score, m.away_score, m.period, m.match_time, m.result, m.finished_at,
-           m.suspended, m.featured, m.updated_at
+           m.suspended, m.featured, m.header, m.updated_at
     FROM matches m JOIN sports s ON s.id = m.sport_id LEFT JOIN leagues l ON l.id = m.league_id";
 
 // ---- matches (list) ----
-async fn matches_core(state: &AppState, client: &ApiClient, provider: &str, q: ListQuery)
+pub(crate) async fn matches_core(state: &AppState, client: &ApiClient, provider: &str, q: ListQuery)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     require_capability(state, provider, "matches").await?;
     let limit = q.limit.unwrap_or(50).clamp(1, 500);
@@ -274,10 +258,6 @@ async fn matches_core(state: &AppState, client: &ApiClient, provider: &str, q: L
         .await?;
     Ok((rate_headers(client), Json(rows)))
 }
-async fn matches(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>, Query(q): Query<ListQuery>)
-    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
-    matches_core(&state, &client, &provider, q).await
-}
 async fn matches_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ListQuery>)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     let provider = need_provider(q.provider.clone())?;
@@ -285,7 +265,7 @@ async fn matches_q(State(state): State<AppState>, client: ApiClient, Query(q): Q
 }
 
 // ---- match detail ----
-async fn match_detail_core(state: &AppState, client: &ApiClient, provider: &str, id: i64)
+pub(crate) async fn match_detail_core(state: &AppState, client: &ApiClient, provider: &str, id: i64)
     -> AppResult<(HeaderMap, Json<Value>)> {
     require_capability(state, provider, "matches").await?;
     let sql = format!("{MATCH_SELECT} WHERE m.provider = $1 AND m.id = $2");
@@ -304,17 +284,13 @@ async fn match_detail_core(state: &AppState, client: &ApiClient, provider: &str,
     body["odds"] = serde_json::to_value(odds).unwrap_or_else(|_| json!([]));
     Ok((rate_headers(client), Json(body)))
 }
-async fn match_detail(State(state): State<AppState>, client: ApiClient, Path((provider, id)): Path<(String, i64)>)
-    -> AppResult<(HeaderMap, Json<Value>)> {
-    match_detail_core(&state, &client, &provider, id).await
-}
 async fn match_detail_q(State(state): State<AppState>, client: ApiClient, Path(id): Path<i64>, Query(q): Query<ProviderQuery>)
     -> AppResult<(HeaderMap, Json<Value>)> {
     match_detail_core(&state, &client, &need_provider(q.provider)?, id).await
 }
 
 // ---- live ----
-async fn live_core(state: &AppState, client: &ApiClient, provider: &str)
+pub(crate) async fn live_core(state: &AppState, client: &ApiClient, provider: &str)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     require_capability(state, provider, "live").await?;
     let sql = format!(
@@ -326,17 +302,13 @@ async fn live_core(state: &AppState, client: &ApiClient, provider: &str)
         .await?;
     Ok((rate_headers(client), Json(rows)))
 }
-async fn live(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
-    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
-    live_core(&state, &client, &provider).await
-}
 async fn live_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     live_core(&state, &client, &need_provider(q.provider)?).await
 }
 
 // ---- featured (the provider's promoted "highlights" strip) ----
-async fn featured_core(state: &AppState, client: &ApiClient, provider: &str)
+pub(crate) async fn featured_core(state: &AppState, client: &ApiClient, provider: &str)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     require_capability(state, provider, "matches").await?;
     // Promoted events that are still relevant (not finished), live first.
@@ -350,17 +322,32 @@ async fn featured_core(state: &AppState, client: &ApiClient, provider: &str)
         .await?;
     Ok((rate_headers(client), Json(rows)))
 }
-async fn featured(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
-    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
-    featured_core(&state, &client, &provider).await
-}
 async fn featured_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     featured_core(&state, &client, &need_provider(q.provider)?).await
 }
 
+// ---- header matches (the provider's header match strip) ----
+pub(crate) async fn header_matches_core(state: &AppState, client: &ApiClient, provider: &str)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    require_capability(state, provider, "matches").await?;
+    let sql = format!(
+        "{MATCH_SELECT} WHERE m.provider = $1 AND m.header = true AND m.status <> 'finished'
+         ORDER BY (m.status = 'live') DESC, m.start_time ASC NULLS LAST LIMIT 200"
+    );
+    let rows: Vec<MatchView> = sqlx::query_as(&sql)
+        .bind(provider)
+        .fetch_all(&state.pool)
+        .await?;
+    Ok((rate_headers(client), Json(rows)))
+}
+async fn header_matches_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    header_matches_core(&state, &client, &need_provider(q.provider)?).await
+}
+
 // ---- results (finished matches with derived winners) ----
-async fn results_core(state: &AppState, client: &ApiClient, provider: &str)
+pub(crate) async fn results_core(state: &AppState, client: &ApiClient, provider: &str)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     require_capability(state, provider, "matches").await?;
     let sql = format!(
@@ -373,17 +360,13 @@ async fn results_core(state: &AppState, client: &ApiClient, provider: &str)
         .await?;
     Ok((rate_headers(client), Json(rows)))
 }
-async fn results(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
-    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
-    results_core(&state, &client, &provider).await
-}
 async fn results_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     results_core(&state, &client, &need_provider(q.provider)?).await
 }
 
 // ---- match odds ----
-async fn match_odds_core(state: &AppState, client: &ApiClient, provider: &str, match_id: i64)
+pub(crate) async fn match_odds_core(state: &AppState, client: &ApiClient, provider: &str, match_id: i64)
     -> AppResult<(HeaderMap, Json<Vec<Odd>>)> {
     require_capability(state, provider, "odds").await?;
     let odds: Vec<Odd> = sqlx::query_as(
@@ -395,10 +378,6 @@ async fn match_odds_core(state: &AppState, client: &ApiClient, provider: &str, m
     .fetch_all(&state.pool)
     .await?;
     Ok((rate_headers(client), Json(odds)))
-}
-async fn match_odds(State(state): State<AppState>, client: ApiClient, Path((provider, match_id)): Path<(String, i64)>)
-    -> AppResult<(HeaderMap, Json<Vec<Odd>>)> {
-    match_odds_core(&state, &client, &provider, match_id).await
 }
 async fn match_odds_q(State(state): State<AppState>, client: ApiClient, Path(match_id): Path<i64>, Query(q): Query<ProviderQuery>)
     -> AppResult<(HeaderMap, Json<Vec<Odd>>)> {
@@ -504,13 +483,16 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
                     {"name":"limit","in":"query","schema":{"type":"integer","default":50}},
                     {"name":"offset","in":"query","schema":{"type":"integer","default":0}}],
                 "responses": {"200": resp("Matches", m_ex)}}}));
-            paths.insert(format!("/{pv}/matches/{{id}}"), json!({"get": {"tags":[tag.clone()],
+            let detail_doc = json!({"get": {"tags":[tag.clone()],
                 "summary": format!("{} — match detail + {}", p.name, odds_note),
                 "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],
                 "responses": {"200": resp("Match with odds",
                     &json!({"id":m_ex[0]["id"],"home_team":m_ex[0]["home_team"],"away_team":m_ex[0]["away_team"],
                         "status":"live","suspended":false,"odds":o_ex})),
-                    "404": {"description":"Not found"}}}}));
+                    "404": {"description":"Not found"}}}});
+            paths.insert(format!("/{pv}/matches/{{id}}"), detail_doc.clone());
+            // Alias: same handler, friendlier name.
+            paths.insert(format!("/{pv}/matchdetails/{{id}}"), detail_doc);
         }
         if caps.iter().any(|c| c == "live") {
             paths.insert(format!("/{pv}/live"), json!({"get": {"tags":[tag.clone()],
@@ -521,6 +503,9 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
             paths.insert(format!("/{pv}/featured"), json!({"get": {"tags":[tag.clone()],
                 "summary": format!("{} — featured / highlighted events (promoted strip)", p.name),
                 "responses": {"200": resp("Featured events (matches, outrights and special markets)", m_ex)}}}));
+            paths.insert(format!("/{pv}/headermatches"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — header match strip", p.name),
+                "responses": {"200": resp("Matches shown in the provider's header strip", m_ex)}}}));
         }
         if caps.iter().any(|c| c == "odds") {
             paths.insert(format!("/{pv}/odds/{{match_id}}"), json!({"get": {"tags":[tag.clone()],

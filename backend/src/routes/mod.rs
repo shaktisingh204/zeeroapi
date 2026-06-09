@@ -8,6 +8,7 @@ pub mod live;
 pub mod matches;
 pub mod odds;
 pub mod portal;
+pub mod providers;
 pub mod sports;
 pub mod status;
 pub mod v1;

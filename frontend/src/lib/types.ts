@@ -129,6 +129,12 @@ export interface MatchView {
   match_time: string | null;
   result: "W1" | "Draw" | "W2" | null;
   finished_at: string | null;
+  /** Event is locked in-play (exchange padlock / all markets suspended). */
+  suspended: boolean;
+  /** Promoted in the provider's featured / highlights strip. */
+  featured: boolean;
+  /** Listed in the provider's header match strip. */
+  header: boolean;
   updated_at: string;
 }
 
@@ -137,8 +143,15 @@ export interface Odd {
   match_id: number;
   market: string;
   outcome: string;
+  /** Primary price (sportsbook decimal odd, or exchange best back). */
   value: string;
+  /** Exchange best lay price (null for sportsbooks). */
+  lay: string | null;
+  /** Exchange matched volume / size (null for sportsbooks). */
+  volume: string | null;
   param: string | null;
+  /** This specific line / runner is suspended or blocked. */
+  suspended: boolean;
   updated_at: string;
 }
 

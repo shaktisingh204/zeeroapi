@@ -40,6 +40,12 @@ pub struct Snapshot {
     /// without needing to re-send their full row or guess their sport.
     #[serde(default)]
     pub featured_ids: Vec<i64>,
+    /// Same as `clear_featured`, for the header match strip.
+    #[serde(default)]
+    pub clear_header: bool,
+    /// Same as `featured_ids`, for the header match strip.
+    #[serde(default)]
+    pub header_ids: Vec<i64>,
 }
 
 fn default_provider() -> String {
@@ -84,6 +90,9 @@ pub struct IngestMatch {
     /// Promoted in the provider's featured/highlights strip.
     #[serde(default)]
     pub featured: bool,
+    /// Listed in the provider's header match strip.
+    #[serde(default)]
+    pub header: bool,
     #[serde(default)]
     pub markets: Vec<IngestOdd>,
 }
@@ -182,6 +191,19 @@ async fn snapshot(
             .execute(&mut *tx)
             .await?;
     }
+    if snap.clear_header {
+        sqlx::query("UPDATE matches SET header = false WHERE provider = $1")
+            .bind(provider)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if !snap.header_ids.is_empty() {
+        sqlx::query("UPDATE matches SET header = true WHERE provider = $1 AND id = ANY($2)")
+            .bind(provider)
+            .bind(&snap.header_ids)
+            .execute(&mut *tx)
+            .await?;
+    }
 
     for m in &snap.matches {
         let sport_id = stable_id(&[provider, &m.sport]);
@@ -251,8 +273,8 @@ async fn snapshot(
         sqlx::query(
             "INSERT INTO matches
                 (id, sport_id, league_id, home_team, away_team, home_logo, away_logo, status,
-                 home_score, away_score, period, match_time, suspended, featured, source, provider, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now())
+                 home_score, away_score, period, match_time, suspended, featured, header, source, provider, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now())
              ON CONFLICT (id) DO UPDATE SET
                 league_id = EXCLUDED.league_id, status = EXCLUDED.status,
                 home_logo = COALESCE(EXCLUDED.home_logo, matches.home_logo),
@@ -261,6 +283,7 @@ async fn snapshot(
                 period = EXCLUDED.period, match_time = EXCLUDED.match_time,
                 suspended = EXCLUDED.suspended,
                 featured = (matches.featured OR EXCLUDED.featured),
+                header = (matches.header OR EXCLUDED.header),
                 source = EXCLUDED.source, updated_at = now()",
         )
         .bind(match_id)
@@ -277,6 +300,7 @@ async fn snapshot(
         .bind(&m.time)
         .bind(m.suspended)
         .bind(m.featured)
+        .bind(m.header)
         .bind(&snap.source)
         .bind(provider)
         .execute(&mut *tx)

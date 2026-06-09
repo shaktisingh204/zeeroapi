@@ -177,6 +177,35 @@ FEATURED_JS = r"""
 }
 """
 
+# Read d247's HEADER match strip (the matches shown in the page header / ticker,
+# distinct from the main body list). We flag these by id so the API can serve
+# them at /v1/diamondexch/headermatches. Defensive: scan event anchors inside
+# header / ticker / upcoming / marquee containers.
+HEADER_JS = r"""
+() => {
+    const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+    const evRe = /\/(game-details|market|race|sport-event|event)\/\d+/;
+    const sels = [
+        '[class*="header" i] a[href]', '[class*="ticker" i] a[href]',
+        '[class*="upcoming" i] a[href]', '[class*="marquee" i] a[href]',
+        '[class*="topbar" i] a[href]', '[class*="top-bar" i] a[href]',
+    ];
+    let anchors = [];
+    for (const s of sels) { try { anchors.push(...document.querySelectorAll(s)); } catch (e) {} }
+    const out = [], seen = new Set();
+    for (const a of anchors) {
+        const href = a.getAttribute('href') || '';
+        if (!evRe.test(href)) continue;
+        const name = clean(a.innerText);
+        if (!name || name.length < 2 || name.length > 90) continue;
+        if (seen.has(href)) continue;
+        seen.add(href);
+        out.push({ href, name });
+    }
+    return out;
+}
+"""
+
 OUTCOME = {"1": "W1", "X": "Draw", "2": "W2"}
 # Team separators in priority order: " v "/" vs "/" @ " (real matches),
 # then " - " (esports / virtual "Team (e) - Team" format).
@@ -278,7 +307,11 @@ def detail_to_odds(detail):
 
 
 def build_match(card, sport):
-    name = re.sub(r"\s*/\s*$", "", card.get("name") or "").strip()
+    name = card.get("name") or ""
+    # Strip a trailing " / DD/MM/YYYY HH:MM:SS" date that some rows append to the
+    # name, plus any leftover trailing slash.
+    name = re.sub(r"\s*/\s*\d{1,2}/\d{1,2}/\d{2,4}.*$", "", name)
+    name = re.sub(r"\s*/\s*$", "", name).strip()
     teams = split_teams(name)
     if not teams:
         # Not "Team v Team": a race, outright/winner market or tournament.
@@ -636,22 +669,79 @@ async def scrape_featured(client, page):
         return 0
 
 
-async def scrape_sport(client, page, idx, sport):
-    """Phase 1: fast list sweep for one sport. Returns (matches, odds, live_dicts)."""
-    if not await open_tab(page, idx):
-        return 0, 0, []
+async def scrape_header(client, page):
+    """Phase 0.6: read the HEADER match strip and flag those matches so the API
+    serves them at /v1/diamondexch/headermatches. Flag-by-id (matches also exist
+    via the main sweep); `clear_header` makes the strip authoritative each pass."""
     try:
-        cards = await page.evaluate(EXTRACT_JS)
+        items = await page.evaluate(HEADER_JS)
     except Exception as e:
-        print(f"  [{sport}] eval error: {e}", file=sys.stderr)
+        print(f"  header eval error: {e}", file=sys.stderr)
+        return 0
+    ids, seen = [], set()
+    for it in (items or []):
+        eid = event_id_from_href(it.get("href") or "")
+        if eid is not None and eid not in seen:
+            seen.add(eid)
+            ids.append(eid)
+    if not ids:
+        print("  header: none found")
+        return 0
+    try:
+        r = await client.post(
+            f"{BACKEND_URL}/api/ingest/snapshot",
+            headers={"X-Ingest-Key": INGEST_KEY},
+            json={"source": "d247-header", "provider": PROVIDER,
+                  "matches": [], "header_ids": ids, "clear_header": True},
+            timeout=30,
+        )
+        r.raise_for_status()
+        print(f"  header: {len(ids)} matches flagged")
+        return len(ids)
+    except Exception as e:
+        print(f"  header POST failed: {e}", file=sys.stderr)
+        return 0
+
+
+async def scrape_sport(client, page, idx, sport):
+    """Phase 1: list sweep for one sport. Returns (matches, odds, live_dicts).
+
+    d247's event list is scroll-VIRTUALIZED: rows render as they enter the
+    viewport and de-render once scrolled away, so a single extract only sees one
+    screenful. We extract repeatedly WHILE scrolling down and accumulate every
+    row by href, capturing the full list (including rows whose odds are all "-").
+    """
+    if not await open_tab(page, idx, light=True):  # we drive our own scroll below
         return 0, 0, []
+    # Start at the top of the list.
+    try:
+        await page.mouse.wheel(0, -40000)
+        await page.wait_for_timeout(250)
+    except Exception:
+        pass
+
     seen = {}
-    for c in cards:
-        m = build_match(c, sport)
-        if m:
-            # Key by href when present (events share an empty away team).
-            key = m.get("_href") or (m["home"], m["away"])
-            seen[key] = m
+    stale = 0
+    for _ in range(60):  # hard cap on scroll steps
+        try:
+            cards = await page.evaluate(EXTRACT_JS)
+        except Exception as e:
+            print(f"  [{sport}] eval error: {e}", file=sys.stderr)
+            cards = []
+        before = len(seen)
+        for c in cards:
+            m = build_match(c, sport)
+            if m:
+                # Key by href when present (events share an empty away team).
+                key = m.get("_href") or (m["home"], m["away"])
+                seen[key] = m
+        # Stop once several consecutive steps add nothing new (reached the end).
+        stale = stale + 1 if len(seen) == before else 0
+        if stale >= 4:
+            break
+        await page.mouse.wheel(0, 1100)
+        await page.wait_for_timeout(220)
+
     matches = list(seen.values())
     if not matches:
         print(f"  [{sport}] no matches/events")
@@ -719,6 +809,9 @@ async def one_pass(client, page):
 
     # Phase 0.5 — read the top highlights strip and flag featured events.
     await scrape_featured(client, page)
+
+    # Phase 0.6 — read the header match strip and flag header matches.
+    await scrape_header(client, page)
 
     labels = await tab_labels(page)
     if not labels:
