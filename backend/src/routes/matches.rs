@@ -28,7 +28,7 @@ const BASE_SELECT: &str = "
     SELECT m.id, m.provider, m.sport_id, s.name AS sport_name, m.league_id, l.name AS league_name,
            m.home_team, m.away_team, m.home_logo, m.away_logo,
            m.start_time, m.status, m.home_score, m.away_score,
-           m.period, m.match_time, m.result, m.finished_at, m.suspended, m.updated_at
+           m.period, m.match_time, m.result, m.finished_at, m.suspended, m.featured, m.updated_at
     FROM matches m
     JOIN sports s ON s.id = m.sport_id
     LEFT JOIN leagues l ON l.id = m.league_id

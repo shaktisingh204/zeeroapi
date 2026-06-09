@@ -157,7 +157,7 @@ export default function AnalyticsPage() {
             <StatCard label="Requests" value={totalReq.toLocaleString()} accent="#3b82f6" />
             <StatCard label="Error rate" value={`${errRate}%`} accent={Number(errRate) > 5 ? "#ef4444" : "#34d27b"} />
             <StatCard label="Avg latency" value={`${avgLatency} ms`} accent="#f59e0b" />
-            <StatCard label="Top endpoint" value={topEndpoint ? `${topEndpoint.endpoint || "·"}` : "—"} accent="#a855f7" />
+            <StatCard label="Top endpoint" value={topEndpoint ? `${topEndpoint.endpoint || "none"}` : "none"} accent="#a855f7" />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

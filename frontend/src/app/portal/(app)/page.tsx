@@ -1,425 +1,216 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
-import { KeyRound, Copy, Check, Rocket, PlayCircle } from "lucide-react";
+import Link from "next/link";
+import {
+  KeyRound,
+  Boxes,
+  TerminalSquare,
+  Code2,
+  ArrowRight,
+  Rocket,
+  Check,
+  Clock,
+} from "lucide-react";
 import { portal, API_BASE, DOCS_URL } from "@/lib/portal";
-import type { ApiKey, Plan } from "@/lib/types";
-import type { MeResponse, UsageResponse } from "@/lib/portal";
-import { getProviders, type ProviderOption } from "@/lib/providers";
-import { PageHeader, StatCard, Spinner, EmptyState } from "@/components/ui";
+import type { MeResponse, UsageResponse, RequestLogEntry } from "@/lib/portal";
+import type { ApiKey } from "@/lib/types";
+import { PageHeader, StatCard, Spinner, SectionCard, EmptyState } from "@/components/ui";
 
-interface IssuedKey {
-  id: string;
-  key: string;
-  key_prefix: string;
-  note: string;
+const QUICK_LINKS = [
+  { href: "/portal/keys", label: "API Keys", desc: "Create and manage keys", icon: KeyRound, c: "#34d27b" },
+  { href: "/portal/providers", label: "Providers", desc: "Browse the catalog", icon: Boxes, c: "#3b82f6" },
+  { href: "/portal/playground", label: "Playground", desc: "Test calls live", icon: TerminalSquare, c: "#8b5cf6" },
+  { href: "/portal/sdks", label: "SDKs", desc: "Typed clients", icon: Code2, c: "#f59e0b" },
+];
+
+function statusColor(s?: number) {
+  if (!s) return "#8a93a6";
+  if (s >= 500) return "#ef4444";
+  if (s >= 400) return "#f59e0b";
+  return "#34d27b";
 }
 
-export default function PortalDashboard() {
-  const router = useRouter();
+export default function PortalOverview() {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [keys, setKeys] = useState<ApiKey[]>([]);
-  const [plans, setPlans] = useState<Plan[]>([]);
+  const [recent, setRecent] = useState<RequestLogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const [keyName, setKeyName] = useState("");
-  const [issued, setIssued] = useState<IssuedKey | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [changing, setChanging] = useState(false);
-
-  // Key scoping (advanced)
-  const [showScope, setShowScope] = useState(false);
-  const [keyProviders, setKeyProviders] = useState<string[]>([]);
-  const [keyIps, setKeyIps] = useState("");
-  const [keyExpiry, setKeyExpiry] = useState("");
-  const [providerOpts, setProviderOpts] = useState<ProviderOption[]>([]);
-
   useEffect(() => {
-    getProviders().then(setProviderOpts);
-  }, []);
-
-  function load() {
-    setLoading(true);
-    Promise.all([portal.me(), portal.usage(), portal.keys(), portal.plans()])
-      .then(([m, u, k, p]) => {
+    Promise.all([portal.me(), portal.usage(), portal.keys()])
+      .then(([m, u, k]) => {
         setMe(m);
         setUsage(u);
         setKeys(k);
-        setPlans(p);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "failed"))
       .finally(() => setLoading(false));
-  }
-
-  useEffect(load, []);
-
-  async function createKey() {
-    setError("");
-    try {
-      const ips = keyIps
-        .split(/[\s,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const res = await portal.createKey(keyName, {
-        allowed_providers: keyProviders.length ? keyProviders : undefined,
-        allowed_ips: ips.length ? ips : undefined,
-        expires_at: keyExpiry ? new Date(keyExpiry).toISOString() : undefined,
-      });
-      setIssued(res);
-      setKeyName("");
-      setKeyProviders([]);
-      setKeyIps("");
-      setKeyExpiry("");
-      setShowScope(false);
-      setCopied(false);
-      const k = await portal.keys();
-      setKeys(k);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "failed");
-    }
-  }
-
-  function toggleProvider(slug: string) {
-    setKeyProviders((prev) =>
-      prev.includes(slug) ? prev.filter((p) => p !== slug) : [...prev, slug]
-    );
-  }
-
-  async function revoke(id: string) {
-    if (!confirm("Revoke this key?")) return;
-    setError("");
-    try {
-      await portal.revokeKey(id);
-      const k = await portal.keys();
-      setKeys(k);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "failed");
-    }
-  }
-
-  async function copyKey() {
-    if (!issued) return;
-    try {
-      await navigator.clipboard.writeText(issued.key);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setError("copy failed");
-    }
-  }
-
-  async function changePlan(slug: string) {
-    if (changing) return;
-    setError("");
-    setChanging(true);
-    try {
-      await portal.changePlan(slug);
-      const m = await portal.me();
-      setMe(m);
-      const u = await portal.usage();
-      setUsage(u);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "failed");
-    } finally {
-      setChanging(false);
-    }
-  }
-
-  function testNow() {
-    if (!issued) return;
-    // Prefill the Playground with this key, then jump there.
-    localStorage.setItem("zeroapi_pg_key", issued.key);
-    router.push("/portal/playground");
-  }
+    portal.requests({ limit: 5 }).then((r) => setRecent(r.requests)).catch(() => {});
+  }, []);
 
   if (loading || !me) return <Spinner />;
 
   const plan = me.plan;
-  const quotaLabel =
-    usage && usage.monthly_quota > 0 ? usage.monthly_quota.toLocaleString() : "∞";
-  const usedLabel = usage ? usage.used_this_month.toLocaleString() : "0";
+  const quota = usage?.monthly_quota ?? 0;
+  const used = usage?.used_this_month ?? 0;
+  const unlimited = quota <= 0;
+  const pct = unlimited ? 0 : Math.min(100, Math.round((used / quota) * 100));
+  const meterColor = pct >= 90 ? "#ef4444" : pct >= 70 ? "#f59e0b" : "#34d27b";
+  const activeKeys = keys.filter((k) => !k.revoked).length;
+  const firstRun = activeKeys === 0;
 
   return (
     <div>
       <PageHeader
-        title="Dashboard"
-        subtitle="Your ZeroApi access"
+        title={`Welcome back${me.customer.name ? `, ${me.customer.name.split(" ")[0]}` : ""}`}
+        subtitle="Your ZeroApi access at a glance."
         actions={
-          <a className="btn-ghost" href={DOCS_URL} target="_blank">
+          <a className="btn-ghost" href={DOCS_URL} target="_blank" rel="noreferrer">
             API Docs ↗
           </a>
         }
       />
 
-      {error && (
-        <div className="rounded-lg bg-live/15 text-live text-sm px-3 py-2 mb-4">{error}</div>
-      )}
+      {error && <div className="mb-4 rounded-lg bg-live/15 px-3 py-2 text-sm text-live">{error}</div>}
 
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-3 mb-6">
-        <StatCard label="Current plan" value={plan.name} accent="#34d27b" />
-        <StatCard label="Rate limit" value={`${plan.rate_limit_per_min}/min`} accent="#3b82f6" />
-        <StatCard label="This month" value={`${usedLabel} / ${quotaLabel}`} accent="#f59e0b" />
+      {/* Stats */}
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <StatCard label="Current plan" value={plan.name} icon={<Rocket size={18} />} accent="#34d27b" />
+        <StatCard label="Rate limit" value={`${plan.rate_limit_per_min}/min`} icon={<Clock size={18} />} accent="#3b82f6" />
+        <StatCard label="Active keys" value={activeKeys} icon={<KeyRound size={18} />} accent="#f59e0b" />
       </div>
 
-      {/* First-run guide */}
-      {keys.length === 0 && !issued && (
-        <div className="card p-5 mb-6 border-brand/30">
-          <div className="flex items-center gap-2 mb-4">
+      {/* Usage meter */}
+      <div className="card mb-6 p-5">
+        <div className="mb-3 flex items-end justify-between">
+          <div>
+            <p className="text-sm text-muted">Requests this month</p>
+            <p className="mt-1 text-2xl font-semibold tabular-nums text-white">
+              {used.toLocaleString()}
+              <span className="text-base font-normal text-muted">
+                {" "}/ {unlimited ? "unlimited" : quota.toLocaleString()}
+              </span>
+            </p>
+          </div>
+          <Link href="/portal/analytics" className="btn-quiet text-sm">
+            View analytics <ArrowRight size={14} />
+          </Link>
+        </div>
+        <div className="h-2 w-full overflow-hidden rounded-full bg-surface-3">
+          <div
+            className="h-full rounded-full transition-[width] duration-700 ease-[cubic-bezier(0.23,1,0.32,1)]"
+            style={{ width: `${unlimited ? 4 : Math.max(pct, 2)}%`, background: meterColor }}
+          />
+        </div>
+        {!unlimited && <p className="mt-2 text-xs text-muted">{pct}% of your monthly quota used.</p>}
+      </div>
+
+      {/* First-run guide OR recent activity */}
+      {firstRun ? (
+        <div className="card mb-6 border-brand/30 p-5">
+          <div className="mb-4 flex items-center gap-2">
             <Rocket size={18} className="text-brand" />
             <h2 className="text-lg font-semibold text-white">Get started in 3 steps</h2>
           </div>
           <ol className="grid gap-3 sm:grid-cols-3">
-            <li className="rounded-lg bg-surface-2/50 p-4">
-              <span className="badge bg-brand/15 text-brand mb-2">1</span>
-              <p className="text-sm text-white font-medium">Create an API key</p>
-              <p className="text-xs text-muted mt-1">Use the form below — you can scope it to a provider.</p>
-            </li>
-            <li className="rounded-lg bg-surface-2/50 p-4">
-              <span className="badge bg-brand/15 text-brand mb-2">2</span>
-              <p className="text-sm text-white font-medium">Make your first call</p>
-              <p className="text-xs text-muted mt-1">Hit “Test now” to open the Playground with your key prefilled.</p>
-            </li>
-            <li className="rounded-lg bg-surface-2/50 p-4">
-              <span className="badge bg-brand/15 text-brand mb-2">3</span>
-              <p className="text-sm text-white font-medium">Build with an SDK</p>
-              <p className="text-xs text-muted mt-1">Grab a typed client from the SDKs tab or read the docs.</p>
-            </li>
+            {[
+              { n: 1, t: "Create an API key", d: "Generate a key and scope it to a provider.", href: "/portal/keys", cta: "Create key" },
+              { n: 2, t: "Make your first call", d: "Open the Playground and hit an endpoint.", href: "/portal/playground", cta: "Open Playground" },
+              { n: 3, t: "Build with an SDK", d: "Grab a typed client for your language.", href: "/portal/sdks", cta: "Browse SDKs" },
+            ].map((s) => (
+              <li key={s.n} className="flex flex-col rounded-lg bg-surface-2/50 p-4">
+                <span className="badge mb-2 w-fit bg-brand/15 text-brand">{s.n}</span>
+                <p className="text-sm font-medium text-white">{s.t}</p>
+                <p className="mt-1 flex-1 text-xs text-muted">{s.d}</p>
+                <Link href={s.href} className="btn-ghost mt-3 justify-center text-sm">
+                  {s.cta}
+                </Link>
+              </li>
+            ))}
           </ol>
         </div>
+      ) : (
+        <SectionCard
+          title="Recent requests"
+          className="mb-6"
+          actions={
+            <Link href="/portal/logs" className="btn-quiet text-sm">
+              View all <ArrowRight size={14} />
+            </Link>
+          }
+        >
+          {recent.length === 0 ? (
+            <EmptyState message="No requests yet. Make a call from the Playground." />
+          ) : (
+            <div className="divide-y divide-border-soft">
+              {recent.map((r, i) => (
+                <div key={i} className="flex items-center gap-3 py-2.5 text-sm">
+                  <span
+                    className="rounded px-1.5 py-0.5 font-mono text-[11px] font-bold"
+                    style={{ background: statusColor(r.status) + "22", color: statusColor(r.status) }}
+                  >
+                    {r.status ?? "-"}
+                  </span>
+                  <code className="min-w-0 flex-1 truncate text-gray-300">{r.m} {r.p}</code>
+                  {r.latency_ms != null && (
+                    <span className="shrink-0 text-xs tabular-nums text-muted">{r.latency_ms}ms</span>
+                  )}
+                  <span className="hidden shrink-0 text-xs text-muted-2 sm:block">
+                    {new Date(r.t * 1000).toLocaleTimeString()}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </SectionCard>
       )}
 
-      {/* API keys */}
-      <div className="card p-5 mb-6">
-        <h2 className="text-lg font-semibold text-white mb-4">API keys</h2>
-
-        <div className="flex flex-wrap items-end gap-2 mb-2">
-          <div className="flex-1 min-w-[160px]">
-            <label className="text-sm text-muted">Key name</label>
-            <input
-              className="input mt-1"
-              type="text"
-              value={keyName}
-              placeholder="e.g. production"
-              onChange={(e) => setKeyName(e.target.value)}
-            />
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowScope((s) => !s)}
-            className="btn-ghost"
-          >
-            {showScope ? "Hide scoping" : "Scope key"}
-          </button>
-          <button onClick={createKey} className="btn-primary">
-            <KeyRound size={15} /> Create new key
-          </button>
-        </div>
-
-        {showScope && (
-          <div className="rounded-lg border border-border bg-surface-2/40 p-4 mb-4 space-y-4">
-            <div>
-              <label className="text-sm text-muted">Allowed providers</label>
-              <p className="text-xs text-muted/70 mb-2">Leave empty to allow all providers.</p>
-              <div className="flex flex-wrap gap-2">
-                {providerOpts.map((p) => (
-                  <button
-                    key={p.slug}
-                    type="button"
-                    onClick={() => toggleProvider(p.slug)}
-                    className={`badge cursor-pointer ${
-                      keyProviders.includes(p.slug)
-                        ? "bg-brand/20 text-brand"
-                        : "bg-surface-2 text-muted"
-                    }`}
-                  >
-                    {p.name}
-                  </button>
-                ))}
+      {/* Quick links */}
+      <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">
+        {QUICK_LINKS.map((l) => {
+          const Icon = l.icon;
+          return (
+            <Link
+              key={l.href}
+              href={l.href}
+              className="card group p-5 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-pop"
+            >
+              <div
+                className="flex h-10 w-10 items-center justify-center rounded-lg"
+                style={{ background: l.c + "22", color: l.c }}
+              >
+                <Icon size={18} />
               </div>
-            </div>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="text-sm text-muted">Allowed IPs</label>
-                <input
-                  className="input mt-1"
-                  type="text"
-                  value={keyIps}
-                  placeholder="comma-separated, optional"
-                  onChange={(e) => setKeyIps(e.target.value)}
-                />
-              </div>
-              <div>
-                <label className="text-sm text-muted">Expires</label>
-                <input
-                  className="input mt-1"
-                  type="date"
-                  value={keyExpiry}
-                  onChange={(e) => setKeyExpiry(e.target.value)}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        {keys.length === 0 ? (
-          <EmptyState message="No API keys." />
-        ) : (
-          <table className="w-full">
-            <thead className="border-b border-border">
-              <tr>
-                <th className="th">Key</th>
-                <th className="th">Name</th>
-                <th className="th">Scope</th>
-                <th className="th">Created</th>
-                <th className="th">Last used</th>
-                <th className="th"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {keys.map((k) => (
-                <tr
-                  key={k.id}
-                  className={k.revoked ? "line-through text-muted opacity-60" : ""}
-                >
-                  <td className="td">
-                    <code className="text-white">{k.key_prefix}…</code>
-                  </td>
-                  <td className="td">{k.name ?? "—"}</td>
-                  <td className="td">
-                    {!k.allowed_providers && !k.allowed_ips && !k.expires_at ? (
-                      <span className="text-muted">full</span>
-                    ) : (
-                      <div className="flex flex-wrap gap-1">
-                        {k.allowed_providers?.map((p) => (
-                          <span key={p} className="badge bg-blue-500/15 text-blue-400">{p}</span>
-                        ))}
-                        {k.allowed_ips && (
-                          <span className="badge bg-purple-500/15 text-purple-400">IP-locked</span>
-                        )}
-                        {k.expires_at && (
-                          <span className="badge bg-surface-2 text-muted">
-                            exp {new Date(k.expires_at).toLocaleDateString()}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </td>
-                  <td className="td text-muted">
-                    {new Date(k.created_at).toLocaleDateString()}
-                  </td>
-                  <td className="td text-muted">
-                    {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}
-                  </td>
-                  <td className="td text-right">
-                    {!k.revoked && (
-                      <button onClick={() => revoke(k.id)} className="btn-ghost">
-                        Revoke
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
+              <p className="mt-3 flex items-center gap-1 font-medium text-white">
+                {l.label}
+                <ArrowRight size={14} className="text-muted-2 transition-transform duration-150 group-hover:translate-x-0.5" />
+              </p>
+              <p className="mt-0.5 text-xs text-muted">{l.desc}</p>
+            </Link>
+          );
+        })}
       </div>
 
       {/* Quick start */}
-      <div className="card p-5 mb-6">
-        <h2 className="text-lg font-semibold text-white mb-1">Quick start</h2>
-        <p className="text-sm text-muted mb-4">
+      <SectionCard title="Quick start">
+        <p className="mb-4 text-sm text-muted">
           Authenticate with the <code className="text-white">X-API-Key</code> header. Endpoints are
-          provider-based (<code className="text-white">/{`{provider}`}/...</code>).
+          provider-scoped (<code className="text-white">/{`{provider}`}/...</code>).
         </p>
-        <pre className="bg-[#0b0e14] border border-border rounded-lg p-4 overflow-x-auto text-sm text-gray-300">
+        <div className="flex items-center gap-2">
+          <pre className="flex-1 overflow-x-auto rounded-lg border border-border bg-[#0b0e14] p-4 text-sm text-gray-300">
 {`curl -H "X-API-Key: YOUR_KEY" "${API_BASE}/melbet/live"`}
-        </pre>
-      </div>
-
-      {/* Plan / upgrade */}
-      <div className="card p-5">
-        <h2 className="text-lg font-semibold text-white mb-1">Plan</h2>
-        <p className="text-sm text-muted mb-4">
-          Change your plan at any time. (No real billing — this is a demo.)
-        </p>
-        {plans.length === 0 ? (
-          <EmptyState message="No plans available." />
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {plans.map((p) => {
-              const current = p.slug === plan.slug;
-              return (
-                <div
-                  key={p.slug}
-                  className={`rounded-lg border p-4 flex flex-col ${
-                    current ? "border-brand" : "border-border"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="font-medium text-white">{p.name}</p>
-                    {current && <span className="badge bg-brand/15 text-brand">Current</span>}
-                  </div>
-                  <p className="mt-1 text-2xl font-semibold text-white">
-                    ${(p.price_cents / 100).toFixed(0)}
-                    <span className="text-sm font-normal text-muted">/mo</span>
-                  </p>
-                  <ul className="mt-3 space-y-1 text-sm text-muted flex-1">
-                    <li>{p.rate_limit_per_min}/min rate limit</li>
-                    <li>
-                      {p.monthly_quota > 0 ? p.monthly_quota.toLocaleString() : "Unlimited"} req/mo
-                    </li>
-                    {p.features.map((f) => (
-                      <li key={f}>{f}</li>
-                    ))}
-                  </ul>
-                  <button
-                    onClick={() => changePlan(p.slug)}
-                    disabled={current || changing}
-                    className="btn-primary w-full mt-4 justify-center disabled:opacity-50"
-                  >
-                    {current ? "Current plan" : "Switch"}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* New-key modal: shown once on creation; full key is never retrievable again */}
-      {issued && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
-          <div className="w-full max-w-lg card p-6">
-            <div className="flex items-center gap-2 mb-1">
-              <KeyRound size={18} className="text-brand" />
-              <h2 className="text-lg font-semibold text-white">Your new API key</h2>
-            </div>
-            <p className="text-sm text-muted mb-4">
-              Copy it now — for security it <strong className="text-white">won&apos;t be shown again</strong>.
-            </p>
-            <div className="flex items-center gap-2 mb-4">
-              <code className="flex-1 break-all rounded-lg bg-[#0b0e14] border border-border px-3 py-2 text-sm text-white">
-                {issued.key}
-              </code>
-              <button onClick={copyKey} className="btn-ghost shrink-0">
-                {copied ? <Check size={15} /> : <Copy size={15} />}
-                {copied ? "Copied" : "Copy"}
-              </button>
-            </div>
-            <div className="flex flex-wrap gap-2 justify-end">
-              <button onClick={() => setIssued(null)} className="btn-ghost">
-                {copied ? "Done" : "I've copied it"}
-              </button>
-              <button onClick={testNow} className="btn-primary">
-                <PlayCircle size={15} /> Test now in Playground
-              </button>
-            </div>
-          </div>
+          </pre>
         </div>
-      )}
+        <div className="mt-3 flex items-center gap-3 text-sm">
+          <Link href="/portal/keys" className="text-brand hover:underline">Get a key</Link>
+          <span className="text-muted-2">·</span>
+          <Link href="/portal/playground" className="text-brand hover:underline">Run it in the Playground</Link>
+        </div>
+      </SectionCard>
     </div>
   );
 }

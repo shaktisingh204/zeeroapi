@@ -30,6 +30,16 @@ pub struct Snapshot {
     /// with zero current matches.
     #[serde(default)]
     pub sports: Vec<IngestSportNode>,
+    /// When true, clear every `featured` flag for this provider before applying
+    /// the snapshot. The featured scraper sets this so the promoted strip is
+    /// authoritative each pass (rotated-out events stop being featured).
+    #[serde(default)]
+    pub clear_featured: bool,
+    /// Match ids (provider ext_ids) to mark `featured = true`. Lets the featured
+    /// scraper flag events that already exist (from the normal sweeps) by id,
+    /// without needing to re-send their full row or guess their sport.
+    #[serde(default)]
+    pub featured_ids: Vec<i64>,
 }
 
 fn default_provider() -> String {
@@ -71,6 +81,9 @@ pub struct IngestMatch {
     /// Exchange/in-play: the whole event is locked (all markets padlocked).
     #[serde(default)]
     pub suspended: bool,
+    /// Promoted in the provider's featured/highlights strip.
+    #[serde(default)]
+    pub featured: bool,
     #[serde(default)]
     pub markets: Vec<IngestOdd>,
 }
@@ -154,6 +167,22 @@ async fn snapshot(
     // One transaction per snapshot — far faster than per-row autocommit at 1 Hz.
     let mut tx = state.pool.begin().await?;
 
+    // Featured pass: reset the provider's featured flags first, so the promoted
+    // strip in this snapshot is authoritative (rotated-out events un-feature).
+    if snap.clear_featured {
+        sqlx::query("UPDATE matches SET featured = false WHERE provider = $1")
+            .bind(provider)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if !snap.featured_ids.is_empty() {
+        sqlx::query("UPDATE matches SET featured = true WHERE provider = $1 AND id = ANY($2)")
+            .bind(provider)
+            .bind(&snap.featured_ids)
+            .execute(&mut *tx)
+            .await?;
+    }
+
     for m in &snap.matches {
         let sport_id = stable_id(&[provider, &m.sport]);
         sqlx::query(
@@ -222,8 +251,8 @@ async fn snapshot(
         sqlx::query(
             "INSERT INTO matches
                 (id, sport_id, league_id, home_team, away_team, home_logo, away_logo, status,
-                 home_score, away_score, period, match_time, suspended, source, provider, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15, now())
+                 home_score, away_score, period, match_time, suspended, featured, source, provider, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16, now())
              ON CONFLICT (id) DO UPDATE SET
                 league_id = EXCLUDED.league_id, status = EXCLUDED.status,
                 home_logo = COALESCE(EXCLUDED.home_logo, matches.home_logo),
@@ -231,6 +260,7 @@ async fn snapshot(
                 home_score = EXCLUDED.home_score, away_score = EXCLUDED.away_score,
                 period = EXCLUDED.period, match_time = EXCLUDED.match_time,
                 suspended = EXCLUDED.suspended,
+                featured = (matches.featured OR EXCLUDED.featured),
                 source = EXCLUDED.source, updated_at = now()",
         )
         .bind(match_id)
@@ -246,6 +276,7 @@ async fn snapshot(
         .bind(&m.period)
         .bind(&m.time)
         .bind(m.suspended)
+        .bind(m.featured)
         .bind(&snap.source)
         .bind(provider)
         .execute(&mut *tx)

@@ -28,6 +28,7 @@ pub fn router() -> Router<AppState> {
         .route("/:provider/matches", get(matches))
         .route("/:provider/matches/:id", get(match_detail))
         .route("/:provider/live", get(live))
+        .route("/:provider/featured", get(featured))
         .route("/:provider/results", get(results))
         .route("/:provider/odds/:match_id", get(match_odds))
         // Forgiving alternative: provider as a query param — /api/v1/live?provider=melbet
@@ -37,6 +38,7 @@ pub fn router() -> Router<AppState> {
         .route("/matches", get(matches_q))
         .route("/matches/:id", get(match_detail_q))
         .route("/live", get(live_q))
+        .route("/featured", get(featured_q))
         .route("/results", get(results_q))
         .route("/odds/:match_id", get(match_odds_q))
         // Helpful JSON for anything else under /api/v1/* (instead of an empty 404).
@@ -240,7 +242,7 @@ const MATCH_SELECT: &str = "
     SELECT m.id, m.provider, m.sport_id, s.name AS sport_name, m.league_id, l.name AS league_name,
            m.home_team, m.away_team, m.home_logo, m.away_logo, m.start_time, m.status,
            m.home_score, m.away_score, m.period, m.match_time, m.result, m.finished_at,
-           m.suspended, m.updated_at
+           m.suspended, m.featured, m.updated_at
     FROM matches m JOIN sports s ON s.id = m.sport_id LEFT JOIN leagues l ON l.id = m.league_id";
 
 // ---- matches (list) ----
@@ -331,6 +333,30 @@ async fn live(State(state): State<AppState>, client: ApiClient, Path(provider): 
 async fn live_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     live_core(&state, &client, &need_provider(q.provider)?).await
+}
+
+// ---- featured (the provider's promoted "highlights" strip) ----
+async fn featured_core(state: &AppState, client: &ApiClient, provider: &str)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    require_capability(state, provider, "matches").await?;
+    // Promoted events that are still relevant (not finished), live first.
+    let sql = format!(
+        "{MATCH_SELECT} WHERE m.provider = $1 AND m.featured = true AND m.status <> 'finished'
+         ORDER BY (m.status = 'live') DESC, m.updated_at DESC LIMIT 100"
+    );
+    let rows: Vec<MatchView> = sqlx::query_as(&sql)
+        .bind(provider)
+        .fetch_all(&state.pool)
+        .await?;
+    Ok((rate_headers(client), Json(rows)))
+}
+async fn featured(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    featured_core(&state, &client, &provider).await
+}
+async fn featured_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
+    featured_core(&state, &client, &need_provider(q.provider)?).await
 }
 
 // ---- results (finished matches with derived winners) ----
@@ -490,6 +516,11 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
             paths.insert(format!("/{pv}/live"), json!({"get": {"tags":[tag.clone()],
                 "summary": format!("{} — live matches", p.name),
                 "responses": {"200": resp("Live matches", m_ex)}}}));
+        }
+        if caps.iter().any(|c| c == "matches") {
+            paths.insert(format!("/{pv}/featured"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — featured / highlighted events (promoted strip)", p.name),
+                "responses": {"200": resp("Featured events (matches, outrights and special markets)", m_ex)}}}));
         }
         if caps.iter().any(|c| c == "odds") {
             paths.insert(format!("/{pv}/odds/{{match_id}}"), json!({"get": {"tags":[tag.clone()],

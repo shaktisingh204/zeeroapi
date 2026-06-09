@@ -96,7 +96,7 @@ export default function BillingPage() {
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
         <StatCard label="Current plan" value={plan.name} accent="#22c55e" />
-        <StatCard label="Status" value={summary.subscription_status ?? "—"} accent="#3b82f6" />
+        <StatCard label="Status" value={summary.subscription_status ?? "-"} accent="#3b82f6" />
         <StatCard
           label="Usage this period"
           value={`${summary.used_this_month.toLocaleString()}${unlimited ? "" : ` / ${summary.monthly_quota.toLocaleString()}`}`}
@@ -177,7 +177,7 @@ export default function BillingPage() {
                     </td>
                     <td className="td">
                       <span className={inv.status === "paid" ? "badge-brand" : "badge-muted"}>
-                        {inv.status ?? "—"}
+                        {inv.status ?? "-"}
                       </span>
                     </td>
                     <td className="td text-right">
@@ -191,7 +191,7 @@ export default function BillingPage() {
                           View <ExternalLink size={12} />
                         </a>
                       ) : (
-                        <span className="text-muted-2">—</span>
+                        <span className="text-muted-2">-</span>
                       )}
                     </td>
                   </tr>

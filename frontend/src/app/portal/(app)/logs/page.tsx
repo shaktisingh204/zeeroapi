@@ -67,13 +67,13 @@ export default function LogsPage() {
       key: "status",
       header: "Status",
       className: "font-mono",
-      render: (r) => <span className={statusColor(r.status)}>{r.status ?? "—"}</span>,
+      render: (r) => <span className={statusColor(r.status)}>{r.status ?? "-"}</span>,
     },
     {
       key: "latency_ms",
       header: "Latency",
       className: "text-muted",
-      render: (r) => (r.latency_ms != null ? `${r.latency_ms} ms` : "—"),
+      render: (r) => (r.latency_ms != null ? `${r.latency_ms} ms` : "-"),
     },
     {
       key: "t",
@@ -87,7 +87,7 @@ export default function LogsPage() {
     <div>
       <PageHeader
         title="Request logs"
-        subtitle="Every call made with your API keys — provider, status and latency"
+        subtitle="Every call made with your API keys: provider, status and latency"
         actions={
           <button className="btn-ghost" onClick={load}>
             <RefreshCw size={15} /> Refresh
@@ -138,7 +138,7 @@ export default function LogsPage() {
       {!loading && requests.length > 0 && (
         <div className="flex items-center justify-between mt-4 text-sm">
           <span className="text-muted">
-            Showing {offset + 1}–{offset + requests.length}
+            Showing {offset + 1}-{offset + requests.length}
           </span>
           <div className="flex gap-2">
             <button

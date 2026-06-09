@@ -31,9 +31,22 @@ export default function PlaygroundPage() {
   useEffect(() => {
     const saved = localStorage.getItem(KEY_STORAGE);
     if (saved) setApiKey(saved);
+
+    // Deep-link from the Providers page: preselect provider/endpoint once.
+    const pv = localStorage.getItem("zeroapi_pg_provider");
+    if (pv) {
+      setProvider(pv);
+      localStorage.removeItem("zeroapi_pg_provider");
+    }
+    const ep = localStorage.getItem("zeroapi_pg_endpoint");
+    if (ep && ENDPOINTS.includes(ep)) {
+      setEndpoint(ep);
+      localStorage.removeItem("zeroapi_pg_endpoint");
+    }
+
     getProviders().then((p) => {
       setProviders(p);
-      if (p.length && !p.some((x) => x.slug === "melbet")) setProvider(p[0].slug);
+      if (!pv && p.length && !p.some((x) => x.slug === "melbet")) setProvider(p[0].slug);
     });
   }, []);
 

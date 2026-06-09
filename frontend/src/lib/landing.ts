@@ -6,6 +6,7 @@ import { API_BASE } from "./config";
 export interface PublicProvider {
   slug: string;
   name: string;
+  capabilities?: string[];
 }
 
 export interface PublicPlan {

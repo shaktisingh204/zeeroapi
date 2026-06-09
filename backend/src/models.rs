@@ -103,6 +103,8 @@ pub struct MatchView {
     pub finished_at: Option<DateTime<Utc>>,
     /// Exchange/in-play: the whole event's markets are locked (padlock).
     pub suspended: bool,
+    /// Promoted in the provider's featured/highlights strip.
+    pub featured: bool,
     pub updated_at: DateTime<Utc>,
 }
 

@@ -1,38 +1,99 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Activity, Check, Copy } from "lucide-react";
+import {
+  Activity,
+  Check,
+  Copy,
+  ArrowRight,
+  KeyRound,
+  Gauge,
+  Boxes,
+  Terminal,
+  AlertTriangle,
+  ChevronRight,
+  Layers,
+} from "lucide-react";
 import { API_V1 } from "@/lib/config";
-import { getProviders, type ProviderOption } from "@/lib/providers";
-import { portal } from "@/lib/portal";
-import type { Plan } from "@/lib/types";
+import {
+  getProviders,
+  getPublicPlans,
+  formatPrice,
+  formatQuota,
+  type PublicProvider,
+  type PublicPlan,
+} from "@/lib/landing";
 
-/* ------------------------------------------------------------------ helpers */
+/* ============================================================ provider model */
+// Static capability + type fallback (merged with whatever the live API reports).
+// Capabilities decide which endpoints a provider exposes; "exchange" marks the
+// back/lay/volume/suspended data shape (d247 / diamondexch).
+const PROVIDER_META: Record<string, { name: string; type: "sportsbook" | "exchange"; caps: string[] }> = {
+  melbet:      { name: "MelBet",      type: "sportsbook", caps: ["sports", "leagues", "matches", "live", "odds", "full_markets"] },
+  "1xbet":     { name: "1xBet",       type: "sportsbook", caps: ["sports", "leagues", "matches", "live", "odds"] },
+  betwinner:   { name: "BetWinner",   type: "sportsbook", caps: ["sports", "leagues", "matches", "odds"] },
+  megapari:    { name: "MegaPari",    type: "sportsbook", caps: ["sports", "matches", "odds"] },
+  "1win":      { name: "1Win",        type: "sportsbook", caps: ["sports", "matches", "live", "odds"] },
+  bcgame:      { name: "BC.Game",     type: "sportsbook", caps: ["sports", "leagues", "matches", "live", "odds"] },
+  diamondexch: { name: "Diamond Exch (d247)", type: "exchange", caps: ["sports", "leagues", "matches", "live", "odds", "exchange"] },
+};
+const FALLBACK_SLUGS = ["melbet", "1xbet", "betwinner", "megapari", "1win", "bcgame", "diamondexch"];
 
-function CopyButton({ text }: { text: string }) {
+interface Prov {
+  slug: string;
+  name: string;
+  type: "sportsbook" | "exchange";
+  caps: string[];
+}
+
+function mergeProviders(api: PublicProvider[]): Prov[] {
+  const slugs = api.length ? api.map((p) => p.slug) : FALLBACK_SLUGS;
+  return slugs.map((slug) => {
+    const meta = PROVIDER_META[slug] ?? { name: slug, type: "sportsbook" as const, caps: ["sports", "matches", "odds"] };
+    const live = api.find((p) => p.slug === slug);
+    const caps = live?.capabilities?.length ? live.capabilities : meta.caps;
+    const type: "sportsbook" | "exchange" = caps.includes("exchange") || slug === "diamondexch" ? "exchange" : meta.type;
+    return { slug, name: live?.name ?? meta.name, type, caps };
+  });
+}
+
+/* ============================================================ shared UI bits */
+
+function CopyButton({ text, light = false }: { text: string; light?: boolean }) {
   const [done, setDone] = useState(false);
   return (
     <button
       onClick={async () => {
-        await navigator.clipboard.writeText(text);
-        setDone(true);
-        setTimeout(() => setDone(false), 1400);
+        try {
+          await navigator.clipboard.writeText(text);
+          setDone(true);
+          setTimeout(() => setDone(false), 1400);
+        } catch {
+          /* clipboard blocked */
+        }
       }}
-      className="absolute top-2.5 right-2.5 text-muted hover:text-white transition-colors"
-      aria-label="Copy"
+      className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition-all duration-150 active:scale-[0.92] ${
+        light
+          ? "text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+          : "text-slate-400 hover:bg-white/10 hover:text-white"
+      }`}
+      aria-label="Copy to clipboard"
     >
-      {done ? <Check size={14} className="text-brand" /> : <Copy size={14} />}
+      {done ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
     </button>
   );
 }
 
-function Code({ children }: { children: string }) {
+function CodeBlock({ code, label }: { code: string; label?: string }) {
   return (
-    <div className="relative">
-      <CopyButton text={children} />
-      <pre className="bg-[#0b0e14] border border-border rounded-lg p-4 pr-10 overflow-x-auto text-sm">
-        <code className="text-gray-200 font-mono whitespace-pre">{children}</code>
+    <div className="overflow-hidden rounded-2xl border border-slate-800 bg-[#0d1117]">
+      <div className="flex items-center justify-between border-b border-white/10 px-3.5 py-2">
+        <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-slate-500">{label ?? "shell"}</span>
+        <CopyButton text={code} />
+      </div>
+      <pre className="overflow-x-auto px-4 py-3.5 text-[13px] leading-relaxed">
+        <code className="font-mono text-slate-200 whitespace-pre">{code}</code>
       </pre>
     </div>
   );
@@ -40,6 +101,7 @@ function Code({ children }: { children: string }) {
 
 const LANGS = ["curl", "javascript", "python"] as const;
 type Lang = (typeof LANGS)[number];
+const LANG_LABEL: Record<Lang, string> = { curl: "cURL", javascript: "JavaScript", python: "Python" };
 
 function RequestTabs({ path }: { path: string }) {
   const [lang, setLang] = useState<Lang>("curl");
@@ -51,411 +113,813 @@ function RequestTabs({ path }: { path: string }) {
   };
   return (
     <div>
-      <div className="flex gap-1 mb-2">
+      <div className="mb-2 flex gap-1.5">
         {LANGS.map((l) => (
           <button
             key={l}
             onClick={() => setLang(l)}
-            className={`px-3 py-1 text-xs rounded-md transition-colors ${
-              lang === l ? "bg-brand text-black font-medium" : "bg-surface-2 text-muted hover:text-white"
+            className={`rounded-full px-3 py-1 text-xs font-semibold transition-all duration-150 active:scale-[0.97] ${
+              lang === l
+                ? "bg-slate-900 text-white"
+                : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
             }`}
           >
-            {l === "curl" ? "cURL" : l === "javascript" ? "JavaScript" : "Python"}
+            {LANG_LABEL[l]}
           </button>
         ))}
       </div>
-      <Code>{snippets[lang]}</Code>
+      <CodeBlock code={snippets[lang]} label={LANG_LABEL[lang]} />
     </div>
   );
 }
 
-const METHOD_CLS = "bg-brand/15 text-brand";
+function MethodBadge() {
+  return (
+    <span className="rounded-md bg-emerald-50 px-2 py-0.5 font-mono text-[11px] font-bold tracking-wide text-emerald-600">
+      GET
+    </span>
+  );
+}
+
+/* ============================================================ endpoint model */
 
 interface Param {
   name: string;
-  in: "path" | "query";
+  loc: "path" | "query";
   required?: boolean;
   desc: string;
 }
 interface Endpoint {
   id: string;
-  path: string; // example path used in snippets (with a real provider)
-  display: string; // shown title path with {provider}
+  display: string; // shown path with {provider}
+  template: string; // snippet path with {provider}/{id} placeholders
   summary: string;
-  capability?: string;
+  capability?: string; // capability that gates it (undefined = always available)
   params?: Param[];
-  response: string;
+  /** response builder: depends on whether the provider is an exchange */
+  response: (slug: string, exch: boolean) => string;
 }
 
-function EndpointDoc({ ep }: { ep: Endpoint }) {
-  return (
-    <section id={ep.id} className="scroll-mt-24 border-t border-border pt-8">
-      <div className="flex flex-wrap items-center gap-2 mb-1">
-        <span className={`badge ${METHOD_CLS}`}>GET</span>
-        <code className="text-white font-mono text-sm">{ep.display}</code>
-        {ep.capability && (
-          <span className="badge bg-surface-2 text-muted">requires “{ep.capability}”</span>
-        )}
-      </div>
-      <p className="text-sm text-muted mb-4">{ep.summary}</p>
+const matchListEx = (slug: string, exch: boolean) =>
+  exch
+    ? `[
+  {
+    "id": 884213,
+    "provider": "${slug}",
+    "sport_name": "Cricket",
+    "league_name": "Indian Premier League",
+    "home_team": "Mumbai Indians",
+    "away_team": "Chennai Super Kings",
+    "status": "live",
+    "home_score": null,
+    "away_score": null,
+    "match_time": "MI 142/3 (15.3)",
+    "suspended": false,
+    "featured": true,
+    "result": null,
+    "updated_at": "2026-06-09T14:00:00Z"
+  }
+]`
+    : `[
+  {
+    "id": 887542438404651,
+    "provider": "${slug}",
+    "sport_name": "Football",
+    "league_name": "Premier League",
+    "home_team": "Arsenal",
+    "away_team": "Chelsea",
+    "status": "live",
+    "home_score": 1,
+    "away_score": 0,
+    "match_time": "63:21",
+    "suspended": false,
+    "featured": false,
+    "result": null,
+    "updated_at": "2026-06-09T20:15:00Z"
+  }
+]`;
 
-      {ep.params && ep.params.length > 0 && (
-        <div className="card overflow-hidden mb-4">
-          <table className="w-full text-sm">
-            <thead className="border-b border-border">
-              <tr>
-                <th className="th">Parameter</th>
-                <th className="th">In</th>
-                <th className="th">Required</th>
-                <th className="th">Description</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-border">
-              {ep.params.map((p) => (
-                <tr key={p.name}>
-                  <td className="td font-mono text-brand">{p.name}</td>
-                  <td className="td text-muted">{p.in}</td>
-                  <td className="td text-muted">{p.required ? "yes" : "no"}</td>
-                  <td className="td text-muted">{p.desc}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div>
-          <p className="text-xs uppercase tracking-wide text-muted mb-2">Request</p>
-          <RequestTabs path={ep.path} />
-        </div>
-        <div>
-          <p className="text-xs uppercase tracking-wide text-muted mb-2">Example response</p>
-          <Code>{ep.response}</Code>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-/* ------------------------------------------------------------------ content */
+const oddsEx = (slug: string, exch: boolean) =>
+  exch
+    ? `[
+  { "market": "Match Odds", "outcome": "Mumbai Indians", "value": "1.85", "lay": "1.87", "volume": "240310.00", "suspended": false, "provider": "${slug}" },
+  { "market": "Match Odds", "outcome": "Chennai Super Kings", "value": "2.12", "lay": "2.16", "volume": "198450.00", "suspended": false, "provider": "${slug}" },
+  { "market": "Bookmaker", "outcome": "Mumbai Indians", "value": "78", "lay": "82", "suspended": true, "provider": "${slug}" }
+]`
+    : `[
+  { "market": "Match Result", "outcome": "W1", "value": "2.10", "param": null, "suspended": false, "provider": "${slug}" },
+  { "market": "Total", "outcome": "Over", "value": "1.90", "param": "2.5", "suspended": false, "provider": "${slug}" },
+  { "market": "Double Chance", "outcome": "1X", "value": "1.30", "param": null, "suspended": false, "provider": "${slug}" }
+]`;
 
 const ENDPOINTS: Endpoint[] = [
   {
-    id: "providers",
-    path: "/providers",
+    id: "ep-providers",
     display: "/v1/providers",
-    summary: "List the active data providers you can query.",
-    response: `[
-  { "slug": "melbet", "name": "MelBet", "base_url": "https://india.melbet.com", "is_active": true },
-  { "slug": "bcgame", "name": "BC.Game", "base_url": "https://bc.game", "is_active": true }
+    template: "/providers",
+    summary: "List the active data providers you can query, with their capabilities.",
+    response: () => `[
+  { "slug": "melbet", "name": "MelBet", "capabilities": ["sports","leagues","matches","live","odds","full_markets"], "is_active": true },
+  { "slug": "diamondexch", "name": "Diamond Exch", "capabilities": ["sports","leagues","matches","live","odds","exchange"], "is_active": true }
 ]`,
   },
   {
-    id: "sports",
-    path: "/melbet/sports",
+    id: "ep-sports",
     display: "/v1/{provider}/sports",
-    summary: "List sports for a provider, ordered by match volume.",
+    template: "/{provider}/sports",
+    summary: "Every sport the provider offers, ordered by current match volume.",
     capability: "sports",
-    params: [{ name: "provider", in: "path", required: true, desc: "Provider slug, e.g. melbet." }],
-    response: `[
-  { "id": 4, "name": "Cricket", "slug": "cricket", "match_count": 41, "provider": "melbet" },
-  { "id": 1, "name": "Football", "slug": "football", "match_count": 320, "provider": "melbet" }
+    params: [{ name: "provider", loc: "path", required: true, desc: "Provider slug, e.g. melbet." }],
+    response: (slug) => `[
+  { "id": 4, "name": "Cricket", "slug": "cricket", "match_count": 41, "provider": "${slug}" },
+  { "id": 1, "name": "Football", "slug": "football", "match_count": 320, "provider": "${slug}" }
 ]`,
   },
   {
-    id: "leagues",
-    path: "/melbet/leagues?sport_id=1",
+    id: "ep-leagues",
     display: "/v1/{provider}/leagues",
-    summary: "List leagues, optionally filtered by sport.",
+    template: "/{provider}/leagues?sport_id=1",
+    summary: "Leagues / tournaments, optionally scoped to a single sport.",
     capability: "leagues",
     params: [
-      { name: "provider", in: "path", required: true, desc: "Provider slug." },
-      { name: "sport_id", in: "query", desc: "Filter to one sport." },
+      { name: "provider", loc: "path", required: true, desc: "Provider slug." },
+      { name: "sport_id", loc: "query", desc: "Filter to one sport." },
     ],
-    response: `[
+    response: () => `[
   { "id": 88, "sport_id": 1, "sport_name": "Football", "name": "Premier League", "country": "England", "match_count": 24 }
 ]`,
   },
   {
-    id: "matches",
-    path: "/melbet/matches?status=live&limit=20",
-    display: "/v1/{provider}/matches",
-    summary: "List matches (prematch + live), newest/live first.",
-    capability: "matches",
-    params: [
-      { name: "provider", in: "path", required: true, desc: "Provider slug." },
-      { name: "status", in: "query", desc: "live · prematch · finished" },
-      { name: "sport_id", in: "query", desc: "Filter by sport." },
-      { name: "league_id", in: "query", desc: "Filter by league." },
-      { name: "search", in: "query", desc: "Match team name." },
-      { name: "limit", in: "query", desc: "1–500 (default 50)." },
-      { name: "offset", in: "query", desc: "Pagination offset." },
-    ],
-    response: `[
+    id: "ep-sidebar",
+    display: "/v1/{provider}/sidebar",
+    template: "/{provider}/sidebar",
+    summary: "The full \"All Sports\" tree: every sport with its nested leagues, even ones with no live match right now.",
+    capability: "sports",
+    params: [{ name: "provider", loc: "path", required: true, desc: "Provider slug." }],
+    response: () => `[
   {
-    "id": 887542438404651,
-    "provider": "melbet",
-    "sport_name": "Football",
-    "league_name": "Premier League",
-    "home_team": "Arsenal", "away_team": "Chelsea",
-    "status": "live", "home_score": 1, "away_score": 0,
-    "match_time": "63:21", "result": null, "updated_at": "2026-06-01T20:15:00Z"
+    "id": 4471626188,
+    "name": "Cricket",
+    "slug": "cricket",
+    "match_count": 12,
+    "leagues": [
+      { "id": 2542291, "name": "Indian Premier League", "country": "India", "match_count": 10 }
+    ]
   }
 ]`,
   },
   {
-    id: "match",
-    path: "/melbet/matches/887542438404651",
-    display: "/v1/{provider}/matches/{id}",
-    summary: "Full detail for one match, including all odds/markets.",
+    id: "ep-matches",
+    display: "/v1/{provider}/matches",
+    template: "/{provider}/matches?status=live&limit=20",
+    summary: "List matches and events (prematch + live), live first. Supports filtering and pagination.",
     capability: "matches",
     params: [
-      { name: "provider", in: "path", required: true, desc: "Provider slug." },
-      { name: "id", in: "path", required: true, desc: "Match id." },
+      { name: "provider", loc: "path", required: true, desc: "Provider slug." },
+      { name: "status", loc: "query", desc: "live · prematch · finished" },
+      { name: "sport_id", loc: "query", desc: "Filter by sport id." },
+      { name: "league_id", loc: "query", desc: "Filter by league id." },
+      { name: "search", loc: "query", desc: "Match home/away team name." },
+      { name: "limit", loc: "query", desc: "1 to 500 (default 50)." },
+      { name: "offset", loc: "query", desc: "Pagination offset." },
     ],
-    response: `{
-  "id": 887542438404651, "home_team": "Arsenal", "away_team": "Chelsea",
-  "status": "live", "home_score": 1, "away_score": 0,
-  "odds": [
-    { "market": "Match Result", "outcome": "W1", "value": "2.10", "param": null },
-    { "market": "Total", "outcome": "Over", "value": "1.90", "param": "2.5" }
-  ]
+    response: (slug, exch) => matchListEx(slug, exch),
+  },
+  {
+    id: "ep-match",
+    display: "/v1/{provider}/matches/{id}",
+    template: "/{provider}/matches/{id}",
+    summary: "Full detail for one match or event, including every market/odd.",
+    capability: "matches",
+    params: [
+      { name: "provider", loc: "path", required: true, desc: "Provider slug." },
+      { name: "id", loc: "path", required: true, desc: "Match / event id." },
+    ],
+    response: (slug, exch) =>
+      exch
+        ? `{
+  "id": 884213,
+  "home_team": "Mumbai Indians",
+  "away_team": "Chennai Super Kings",
+  "status": "live",
+  "match_time": "MI 142/3 (15.3)",
+  "suspended": false,
+  "featured": true,
+  "odds": ${oddsEx(slug, true).replace(/\n/g, "\n  ")}
+}`
+        : `{
+  "id": 887542438404651,
+  "home_team": "Arsenal",
+  "away_team": "Chelsea",
+  "status": "live",
+  "home_score": 1,
+  "away_score": 0,
+  "suspended": false,
+  "featured": false,
+  "odds": ${oddsEx(slug, false).replace(/\n/g, "\n  ")}
 }`,
   },
   {
-    id: "live",
-    path: "/melbet/live",
+    id: "ep-live",
     display: "/v1/{provider}/live",
-    summary: "Currently in-play matches with live scores.",
+    template: "/{provider}/live",
+    summary: "Currently in-play matches with live scores, freshest first.",
     capability: "live",
-    params: [{ name: "provider", in: "path", required: true, desc: "Provider slug." }],
-    response: `[
-  { "id": 887542438404651, "home_team": "Arsenal", "away_team": "Chelsea",
-    "status": "live", "home_score": 1, "away_score": 0, "match_time": "63:21" }
-]`,
+    params: [{ name: "provider", loc: "path", required: true, desc: "Provider slug." }],
+    response: (slug, exch) => matchListEx(slug, exch),
   },
   {
-    id: "results",
-    path: "/melbet/results",
-    display: "/v1/{provider}/results",
-    summary: "Recently finished matches with their auto-derived winner (W1/Draw/W2).",
+    id: "ep-featured",
+    display: "/v1/{provider}/featured",
+    template: "/{provider}/featured",
+    summary: "The provider's promoted \"highlights\" strip: featured matches, outrights and special markets.",
     capability: "matches",
-    params: [{ name: "provider", in: "path", required: true, desc: "Provider slug." }],
-    response: `[
-  { "id": 887542438404651, "home_team": "Arsenal", "away_team": "Chelsea",
-    "status": "finished", "home_score": 2, "away_score": 1,
-    "result": "W1", "finished_at": "2026-06-01T21:05:00Z" }
+    params: [{ name: "provider", loc: "path", required: true, desc: "Provider slug." }],
+    response: (slug, exch) =>
+      exch
+        ? `[
+  {
+    "id": 991201,
+    "provider": "${slug}",
+    "sport_name": "Specials",
+    "league_name": null,
+    "home_team": "FIFA World Cup 2026 - Winner",
+    "away_team": "",
+    "status": "prematch",
+    "suspended": false,
+    "featured": true,
+    "updated_at": "2026-06-09T13:40:00Z"
+  }
+]`
+        : matchListEx(slug, false),
+  },
+  {
+    id: "ep-results",
+    display: "/v1/{provider}/results",
+    template: "/{provider}/results",
+    summary: "Recently finished matches with an auto-derived winner (W1 / Draw / W2).",
+    capability: "matches",
+    params: [{ name: "provider", loc: "path", required: true, desc: "Provider slug." }],
+    response: (slug) => `[
+  {
+    "id": 887542438404651,
+    "provider": "${slug}",
+    "home_team": "Arsenal",
+    "away_team": "Chelsea",
+    "status": "finished",
+    "home_score": 2,
+    "away_score": 1,
+    "result": "W1",
+    "finished_at": "2026-06-09T21:05:00Z"
+  }
 ]`,
   },
   {
-    id: "odds",
-    path: "/melbet/odds/887542438404651",
+    id: "ep-odds",
     display: "/v1/{provider}/odds/{match_id}",
-    summary: "All odds/markets for a match.",
+    template: "/{provider}/odds/{id}",
+    summary: "Every market and outcome for one match. Sportsbooks return a single price; exchanges add lay and volume.",
     capability: "odds",
     params: [
-      { name: "provider", in: "path", required: true, desc: "Provider slug." },
-      { name: "match_id", in: "path", required: true, desc: "Match id." },
+      { name: "provider", loc: "path", required: true, desc: "Provider slug." },
+      { name: "match_id", loc: "path", required: true, desc: "Match / event id." },
     ],
-    response: `[
-  { "id": 12, "match_id": 887542438404651, "market": "Match Result", "outcome": "W1", "value": "2.10", "param": null },
-  { "id": 13, "match_id": 887542438404651, "market": "Match Result", "outcome": "W2", "value": "3.40", "param": null }
-]`,
+    response: (slug, exch) => oddsEx(slug, exch),
   },
 ];
 
-const NAV = [
-  { id: "intro", label: "Introduction" },
-  { id: "auth", label: "Authentication" },
-  { id: "limits", label: "Rate limits & plans" },
-  { id: "provider-list", label: "Providers" },
-  { id: "endpoints", label: "Endpoints" },
-  ...ENDPOINTS.map((e) => ({ id: e.id, label: e.display, sub: true })),
-  { id: "errors", label: "Errors" },
-  { id: "sdks", label: "SDKs" },
+/* ============================================================ schema model */
+
+interface Field {
+  name: string;
+  type: string;
+  desc: string;
+  exch?: boolean; // exchange-only field
+}
+interface Schema {
+  id: string;
+  name: string;
+  desc: string;
+  fields: Field[];
+}
+
+const SCHEMAS: Schema[] = [
+  {
+    id: "schema-match",
+    name: "Match",
+    desc: "A match or event. Outright / racing events use the event name as home_team with an empty away_team.",
+    fields: [
+      { name: "id", type: "integer", desc: "Stable provider event id." },
+      { name: "provider", type: "string", desc: "Provider slug this row came from." },
+      { name: "sport_name", type: "string", desc: "Sport, e.g. Football, Cricket." },
+      { name: "league_name", type: "string | null", desc: "League / tournament name." },
+      { name: "home_team", type: "string", desc: "Home team, or the event name for outrights." },
+      { name: "away_team", type: "string", desc: "Away team, or empty for single-entity events." },
+      { name: "status", type: "string", desc: "prematch · live · finished." },
+      { name: "home_score", type: "integer | null", desc: "Live home score." },
+      { name: "away_score", type: "integer | null", desc: "Live away score." },
+      { name: "match_time", type: "string | null", desc: "Clock / live state, e.g. 63:21 or a cricket scoreline." },
+      { name: "suspended", type: "boolean", desc: "Event is locked in-play (all markets padlocked)." },
+      { name: "featured", type: "boolean", desc: "Promoted in the provider's featured / highlights strip." },
+      { name: "result", type: "string | null", desc: "Derived winner once finished (W1 / Draw / W2)." },
+      { name: "updated_at", type: "timestamp", desc: "Last time this row changed." },
+    ],
+  },
+  {
+    id: "schema-odd",
+    name: "Odd",
+    desc: "One market line. Sportsbooks quote a single decimal value; exchanges add a lay price and matched volume.",
+    fields: [
+      { name: "market", type: "string", desc: "Market name, e.g. Match Result, Total, Match Odds, Bookmaker." },
+      { name: "outcome", type: "string", desc: "Outcome / runner, e.g. W1, Over, a team or horse name." },
+      { name: "value", type: "decimal", desc: "Primary price (sportsbook odd, or exchange best back)." },
+      { name: "lay", type: "decimal | null", desc: "Exchange best lay price.", exch: true },
+      { name: "volume", type: "decimal | null", desc: "Exchange matched volume / size at this price.", exch: true },
+      { name: "param", type: "decimal | null", desc: "Line parameter for totals / handicaps (e.g. 2.5)." },
+      { name: "suspended", type: "boolean", desc: "This specific line / runner is locked." },
+      { name: "provider", type: "string", desc: "Provider slug." },
+    ],
+  },
+  {
+    id: "schema-sport",
+    name: "Sport / League",
+    desc: "Catalog entities used to filter matches.",
+    fields: [
+      { name: "id", type: "integer", desc: "Stable id (scope a matches query with sport_id / league_id)." },
+      { name: "name", type: "string", desc: "Display name." },
+      { name: "slug", type: "string", desc: "URL-safe slug (sports only)." },
+      { name: "country", type: "string | null", desc: "League country (leagues only)." },
+      { name: "match_count", type: "integer", desc: "Current matches under this entity." },
+    ],
+  },
 ];
 
-const ERRORS = [
-  ["400", "Bad request — unknown provider/endpoint, missing ?provider, or capability not available."],
-  ["401", "Unauthorized — missing/invalid/expired/revoked API key, or key not allowed from this IP."],
-  ["402", "Payment required — monthly quota exceeded (upgrade your plan)."],
-  ["403", "Forbidden — key is scoped to other providers/IPs."],
-  ["404", "Not found — unknown match id."],
-  ["429", "Too many requests — per-minute rate limit exceeded."],
+const ERRORS: [string, string][] = [
+  ["400", "Bad request. Unknown provider/endpoint, missing ?provider, or a capability the provider does not expose."],
+  ["401", "Unauthorized. Missing, invalid, expired or revoked API key, or the key is not allowed from this IP."],
+  ["402", "Payment required. Monthly quota exceeded. Upgrade your plan (metered plans bill overage instead)."],
+  ["403", "Forbidden. The key is scoped to other providers or source IPs."],
+  ["404", "Not found. Unknown match / event id."],
+  ["429", "Too many requests. Per-minute (or per-second) rate limit exceeded."],
 ];
+
+/* ============================================================ sidebar nav */
+
+const NAV_GROUPS: { title: string; items: { id: string; label: string; mono?: boolean }[] }[] = [
+  {
+    title: "Getting started",
+    items: [
+      { id: "intro", label: "Introduction" },
+      { id: "auth", label: "Authentication" },
+      { id: "limits", label: "Rate limits & plans" },
+    ],
+  },
+  {
+    title: "Providers",
+    items: [{ id: "providers", label: "All providers" }],
+  },
+  {
+    title: "Endpoints",
+    items: ENDPOINTS.map((e) => ({ id: e.id, label: e.display.replace("/v1/", ""), mono: true })),
+  },
+  {
+    title: "Reference",
+    items: [
+      { id: "schemas", label: "Data types" },
+      { id: "errors", label: "Errors" },
+      { id: "sdks", label: "SDKs" },
+    ],
+  },
+];
+
+function useScrollSpy(ids: string[]) {
+  const [active, setActive] = useState(ids[0] ?? "");
+  useEffect(() => {
+    const seen = new Map<string, number>();
+    const io = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          seen.set(e.target.id, e.isIntersecting ? e.intersectionRatio : 0);
+        });
+        let best = "";
+        let bestRatio = 0;
+        seen.forEach((ratio, id) => {
+          if (ratio > bestRatio) {
+            bestRatio = ratio;
+            best = id;
+          }
+        });
+        if (best) setActive(best);
+      },
+      { rootMargin: "-72px 0px -65% 0px", threshold: [0, 0.25, 0.5, 1] }
+    );
+    ids.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) io.observe(el);
+    });
+    return () => io.disconnect();
+  }, [ids.join(",")]); // eslint-disable-line react-hooks/exhaustive-deps
+  return active;
+}
+
+/* ============================================================ page */
 
 export default function DocsPage() {
-  const [providers, setProviders] = useState<ProviderOption[]>([]);
-  const [plans, setPlans] = useState<Plan[]>([]);
+  const [providersApi, setProvidersApi] = useState<PublicProvider[]>([]);
+  const [plans, setPlans] = useState<PublicPlan[]>([]);
+  const [selected, setSelected] = useState("melbet");
 
   useEffect(() => {
-    getProviders().then(setProviders);
-    portal.plans().then(setPlans).catch(() => {});
+    getProviders().then((p) => {
+      setProvidersApi(p);
+      const merged = mergeProviders(p);
+      if (merged.length && !merged.some((m) => m.slug === "melbet")) setSelected(merged[0].slug);
+    });
+    getPublicPlans().then(setPlans);
   }, []);
 
+  const providers = useMemo(() => mergeProviders(providersApi), [providersApi]);
+  const current = providers.find((p) => p.slug === selected) ?? providers[0];
+  const isExchange = current?.type === "exchange";
+  const slug = current?.slug ?? "melbet";
+
+  const allIds = useMemo(() => NAV_GROUPS.flatMap((g) => g.items.map((i) => i.id)), []);
+  const activeId = useScrollSpy(allIds);
+
   return (
-    <div className="min-h-screen bg-[#0b0e14] text-white">
-      {/* Top bar */}
-      <header className="sticky top-0 z-20 border-b border-border bg-surface/90 backdrop-blur">
-        <div className="max-w-[1100px] mx-auto px-6 h-14 flex items-center justify-between">
-          <Link href="/" className="flex items-center gap-2">
-            <span className="h-7 w-7 rounded-lg bg-brand flex items-center justify-center">
-              <Activity size={16} className="text-black" />
+    <div style={{ colorScheme: "light" }} className="min-h-screen bg-[#fbfcff] font-sans text-slate-700 antialiased">
+      {/* ---------------- Top nav ---------------- */}
+      <header className="sticky top-0 z-40 border-b border-slate-200/70 bg-white/85 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-[1280px] items-center justify-between px-5">
+          <Link href="/" className="flex items-center gap-2.5">
+            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500 shadow-[0_6px_16px_-6px_rgba(16,185,129,0.8)]">
+              <Activity size={18} className="text-white" />
             </span>
-            <span className="font-semibold">ZeroApi</span>
-            <span className="text-muted text-sm">API Reference</span>
+            <span className="text-[17px] font-bold tracking-tight text-slate-900">ZeroApi</span>
+            <span className="hidden text-sm font-medium text-slate-400 sm:inline">API Reference</span>
           </Link>
-          <div className="flex items-center gap-4 text-sm">
-            <Link href="/status" className="text-muted hover:text-white">Status</Link>
-            <Link href="/changelog" className="text-muted hover:text-white">Changelog</Link>
-            <Link href="/signup" className="btn-primary">Get API key</Link>
+          <div className="flex items-center gap-5 text-sm font-medium">
+            <Link href="/status" className="hidden text-slate-500 transition-colors hover:text-slate-900 sm:inline">Status</Link>
+            <Link href="/changelog" className="hidden text-slate-500 transition-colors hover:text-slate-900 sm:inline">Changelog</Link>
+            <a
+              href={`${API_V1}/docs`}
+              target="_blank"
+              rel="noreferrer"
+              className="hidden text-slate-500 transition-colors hover:text-slate-900 md:inline"
+            >
+              OpenAPI
+            </a>
+            <Link
+              href="/signup"
+              className="inline-flex items-center gap-2 rounded-full bg-emerald-500 px-4 py-2 text-sm font-semibold text-white shadow-[0_10px_30px_-10px_rgba(16,185,129,0.7)] transition-all duration-150 hover:bg-emerald-600 active:scale-[0.97]"
+            >
+              Get API key <ArrowRight size={15} />
+            </Link>
           </div>
         </div>
       </header>
 
-      <div className="max-w-[1100px] mx-auto px-6 flex gap-10">
-        {/* Sidebar */}
-        <aside className="hidden lg:block w-56 shrink-0 py-10">
-          <nav className="sticky top-20 space-y-1">
-            {NAV.map((n) => (
-              <a
-                key={n.id}
-                href={`#${n.id}`}
-                className={`block text-sm transition-colors hover:text-white ${
-                  "sub" in n && n.sub ? "pl-3 text-muted font-mono text-xs py-0.5" : "text-gray-300 py-1"
-                }`}
-              >
-                {n.label}
-              </a>
+      <div className="mx-auto flex max-w-[1280px] gap-10 px-5">
+        {/* ---------------- Sidebar ---------------- */}
+        <aside className="hidden w-60 shrink-0 lg:block">
+          <nav className="sticky top-16 max-h-[calc(100dvh-4rem)] space-y-6 overflow-y-auto py-10 pr-2">
+            {NAV_GROUPS.map((group) => (
+              <div key={group.title}>
+                <p className="mb-2 px-3 text-[11px] font-bold uppercase tracking-[0.16em] text-slate-400">
+                  {group.title}
+                </p>
+                <div className="space-y-0.5">
+                  {group.items.map((item) => {
+                    const on = activeId === item.id;
+                    return (
+                      <a
+                        key={item.id}
+                        href={`#${item.id}`}
+                        className={`block rounded-lg px-3 py-1.5 text-sm transition-colors ${
+                          item.mono ? "font-mono text-[12.5px]" : ""
+                        } ${
+                          on
+                            ? "bg-emerald-50 font-semibold text-emerald-700"
+                            : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                        }`}
+                      >
+                        {item.label}
+                      </a>
+                    );
+                  })}
+                </div>
+              </div>
             ))}
           </nav>
         </aside>
 
-        {/* Content */}
-        <main className="flex-1 min-w-0 py-10 space-y-10">
+        {/* ---------------- Content ---------------- */}
+        <main className="min-w-0 flex-1 space-y-16 py-10">
+          {/* Intro */}
           <section id="intro" className="scroll-mt-24">
-            <h1 className="text-3xl font-semibold mb-3">ZeroApi reference</h1>
-            <p className="text-muted">
-              One REST API for real-time sports data across multiple providers. Every data
-              endpoint is provider-scoped and returns normalized JSON. Base URL:
+            <span className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> REST · JSON · v1
+            </span>
+            <h1 className="mt-4 text-4xl font-bold tracking-tight text-slate-900 md:text-5xl">API reference</h1>
+            <p className="mt-4 max-w-[60ch] text-lg leading-relaxed text-slate-600">
+              One REST API for real-time sports data across every provider. Each provider is
+              namespaced and returns its own native shape: sportsbooks quote a single price,
+              exchanges quote back, lay and volume, and any locked line is flagged suspended.
             </p>
-            <div className="mt-3"><Code>{API_V1}</Code></div>
-            <p className="text-sm text-muted mt-3">
-              Provider can go in the path (<code className="text-brand">/v1/{`{provider}`}/live</code>)
-              or as a query param (<code className="text-brand">/v1/live?provider=melbet</code>) — both work.
-            </p>
-          </section>
-
-          <section id="auth" className="scroll-mt-24 border-t border-border pt-8">
-            <h2 className="text-xl font-semibold mb-3">Authentication</h2>
-            <p className="text-muted mb-3">
-              Authenticate every request with your API key in the
-              <code className="text-brand"> X-API-Key</code> header (or
-              <code className="text-brand"> ?api_key=</code>). Create keys in the
-              {" "}<Link href="/portal" className="text-brand underline">developer portal</Link>;
-              keys can be scoped to specific providers, source IPs and an expiry.
-            </p>
-            <Code>{`curl -H "X-API-Key: $ZEROAPI_KEY" "${API_V1}/melbet/live"`}</Code>
-            <p className="text-sm text-muted mt-3">
-              Responses include <code className="text-brand">X-RateLimit-Limit</code> and
-              <code className="text-brand"> X-RateLimit-Remaining</code> headers.
+            <div className="mt-6 max-w-xl">
+              <p className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Base URL</p>
+              <CodeBlock code={API_V1} label="base url" />
+            </div>
+            <p className="mt-4 text-sm text-slate-500">
+              The provider can go in the path (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">/v1/{`{provider}`}/live</code>)
+              {" "}or as a query parameter (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">/v1/live?provider=melbet</code>). Both work.
             </p>
           </section>
 
-          <section id="limits" className="scroll-mt-24 border-t border-border pt-8">
-            <h2 className="text-xl font-semibold mb-3">Rate limits &amp; plans</h2>
-            <div className="card overflow-hidden">
+          {/* Auth */}
+          <section id="auth" className="scroll-mt-24 border-t border-slate-200 pt-12">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-50 text-sky-600"><KeyRound size={20} /></span>
+              <h2 className="text-2xl font-bold tracking-tight text-slate-900">Authentication</h2>
+            </div>
+            <p className="mb-4 max-w-[62ch] text-slate-600">
+              Send your key in the <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">X-API-Key</code> header
+              {" "}on every request (or <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">?api_key=</code>). Create and scope keys to specific
+              providers, source IPs and an expiry in the{" "}
+              <Link href="/portal" className="font-semibold text-emerald-600 underline-offset-2 hover:underline">developer portal</Link>.
+            </p>
+            <CodeBlock code={`curl -H "X-API-Key: $ZEROAPI_KEY" "${API_V1}/melbet/live"`} label="cURL" />
+            <p className="mt-3 text-sm text-slate-500">
+              Every response carries <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">X-RateLimit-Limit</code>,
+              {" "}<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">X-RateLimit-Remaining</code> and
+              {" "}<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">X-RateLimit-Window-Seconds</code> headers, so you can back off before you hit a wall.
+            </p>
+          </section>
+
+          {/* Limits & plans */}
+          <section id="limits" className="scroll-mt-24 border-t border-slate-200 pt-12">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-amber-50 text-amber-600"><Gauge size={20} /></span>
+              <h2 className="text-2xl font-bold tracking-tight text-slate-900">Rate limits &amp; plans</h2>
+            </div>
+            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
               <table className="w-full text-sm">
-                <thead className="border-b border-border">
-                  <tr>
-                    <th className="th">Plan</th><th className="th">Requests / min</th>
-                    <th className="th">Monthly quota</th><th className="th">Price</th>
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50/70 text-left">
+                    <th className="px-5 py-3 font-semibold text-slate-600">Plan</th>
+                    <th className="px-5 py-3 font-semibold text-slate-600">Requests / min</th>
+                    <th className="px-5 py-3 font-semibold text-slate-600">Monthly quota</th>
+                    <th className="px-5 py-3 font-semibold text-slate-600">Price</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-border">
+                <tbody className="divide-y divide-slate-100">
                   {plans.length === 0 ? (
-                    <tr><td className="td text-muted" colSpan={4}>Loading plans…</td></tr>
+                    <tr><td className="px-5 py-4 text-slate-400" colSpan={4}>Loading plans…</td></tr>
                   ) : (
                     plans.map((p) => (
-                      <tr key={p.slug}>
-                        <td className="td text-white">{p.name}</td>
-                        <td className="td tabular-nums">{p.rate_limit_per_min}</td>
-                        <td className="td tabular-nums">{p.monthly_quota < 0 ? "Unlimited" : p.monthly_quota.toLocaleString()}</td>
-                        <td className="td tabular-nums">${(p.price_cents / 100).toFixed(0)}/mo</td>
+                      <tr key={p.slug} className="transition-colors hover:bg-slate-50/60">
+                        <td className="px-5 py-3 font-semibold text-slate-900">{p.name}</td>
+                        <td className="px-5 py-3 tabular-nums text-slate-700">{p.rate_limit_per_min.toLocaleString()}</td>
+                        <td className="px-5 py-3 tabular-nums text-slate-700">{formatQuota(p.monthly_quota).replace(" requests / mo", "")}</td>
+                        <td className="px-5 py-3 tabular-nums font-semibold text-slate-900">{formatPrice(p.price_cents)}<span className="font-normal text-slate-400">/mo</span></td>
                       </tr>
                     ))
                   )}
                 </tbody>
               </table>
             </div>
-            <p className="text-sm text-muted mt-3">
-              Over the per-minute limit returns <code className="text-brand">429</code>; over the
-              monthly quota returns <code className="text-brand">402</code> (metered plans bill overage instead).
+            <p className="mt-3 text-sm text-slate-500">
+              Over the per-minute limit returns <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-rose-600">429</code>;
+              {" "}over the monthly quota returns <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-rose-600">402</code>.
             </p>
           </section>
 
-          <section id="provider-list" className="scroll-mt-24 border-t border-border pt-8">
-            <h2 className="text-xl font-semibold mb-3">Providers</h2>
-            <p className="text-muted mb-3">
-              Active providers right now. Each exposes only the endpoints in its capability set.
+          {/* Providers */}
+          <section id="providers" className="scroll-mt-24 border-t border-slate-200 pt-12">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-violet-50 text-violet-600"><Boxes size={20} /></span>
+              <h2 className="text-2xl font-bold tracking-tight text-slate-900">All providers</h2>
+            </div>
+            <p className="mb-5 max-w-[62ch] text-slate-600">
+              Each provider exposes only the endpoints in its capability set, and returns its own
+              native data shape. Sportsbooks give a single price per outcome; exchanges add lay and
+              matched volume, and lock markets in-play.
             </p>
-            <div className="flex flex-wrap gap-2">
-              {providers.length === 0 ? (
-                <span className="text-muted text-sm">Loading…</span>
-              ) : (
-                providers.map((p) => (
-                  <span key={p.slug} className="badge bg-surface-2 text-gray-200">
-                    {p.name} <code className="text-brand ml-1">{p.slug}</code>
-                  </span>
-                ))
-              )}
+            <div className="grid gap-3 sm:grid-cols-2">
+              {providers.map((p) => (
+                <div key={p.slug} className="rounded-2xl border border-slate-200 bg-white p-4">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-900">{p.name}</span>
+                    <span
+                      className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                        p.type === "exchange" ? "bg-violet-50 text-violet-600" : "bg-emerald-50 text-emerald-600"
+                      }`}
+                    >
+                      {p.type}
+                    </span>
+                  </div>
+                  <code className="mt-0.5 block font-mono text-[12.5px] text-slate-400">{p.slug}</code>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {p.caps.map((c) => (
+                      <span key={c} className="rounded-md bg-slate-100 px-2 py-0.5 font-mono text-[11px] text-slate-600">{c}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
           </section>
 
-          <section id="endpoints" className="scroll-mt-24 border-t border-border pt-8">
-            <h2 className="text-xl font-semibold mb-1">Endpoints</h2>
-            <p className="text-muted">All endpoints are <code className="text-brand">GET</code> and return JSON.</p>
+          {/* Endpoints */}
+          <section id="endpoints-head" className="scroll-mt-24 border-t border-slate-200 pt-12">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600"><Layers size={20} /></span>
+              <h2 className="text-2xl font-bold tracking-tight text-slate-900">Endpoints</h2>
+            </div>
+            <p className="mb-4 max-w-[62ch] text-slate-600">
+              Every endpoint is <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">GET</code> and returns JSON.
+              Pick a provider to tailor the snippets and response shapes below.
+            </p>
+            {/* Provider switcher */}
+            <div className="sticky top-16 z-10 -mx-1 mb-2 flex flex-wrap gap-1.5 rounded-2xl border border-slate-200 bg-white/90 p-1.5 backdrop-blur">
+              {providers.map((p) => {
+                const on = p.slug === slug;
+                return (
+                  <button
+                    key={p.slug}
+                    onClick={() => setSelected(p.slug)}
+                    className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-all duration-150 active:scale-[0.97] ${
+                      on ? "bg-emerald-500 text-white shadow-[0_6px_18px_-8px_rgba(16,185,129,0.8)]" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                    }`}
+                  >
+                    {p.name}
+                  </button>
+                );
+              })}
+            </div>
+            {current && (
+              <p className="text-sm text-slate-500">
+                Showing <span className="font-semibold text-slate-700">{current.name}</span>
+                {" "}(<span className="font-mono text-[12.5px] text-emerald-700">{current.type}</span>). Endpoints it does not support are marked below.
+              </p>
+            )}
           </section>
 
-          {ENDPOINTS.map((ep) => (
-            <EndpointDoc key={ep.id} ep={ep} />
-          ))}
+          <div className="space-y-12">
+            {ENDPOINTS.map((ep) => {
+              const available = !ep.capability || (current?.caps.includes(ep.capability) ?? true);
+              const examplePath = ep.template.replace("{provider}", slug).replace("{id}", isExchange ? "884213" : "887542438404651");
+              const displayPath = ep.display;
+              return (
+                <section key={ep.id} id={ep.id} className="scroll-mt-32">
+                  <div className="mb-1.5 flex flex-wrap items-center gap-2">
+                    <MethodBadge />
+                    <code className="font-mono text-[15px] font-semibold text-slate-900">{displayPath}</code>
+                    {ep.capability && (
+                      <span className="rounded-md bg-slate-100 px-2 py-0.5 font-mono text-[11px] text-slate-500">
+                        requires {ep.capability}
+                      </span>
+                    )}
+                    {!available && (
+                      <span className="rounded-md bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600">
+                        not on {current?.name}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mb-4 max-w-[64ch] text-slate-600">{ep.summary}</p>
 
-          <section id="errors" className="scroll-mt-24 border-t border-border pt-8">
-            <h2 className="text-xl font-semibold mb-3">Errors</h2>
-            <div className="card overflow-hidden">
+                  {ep.params && ep.params.length > 0 && (
+                    <div className="mb-4 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-slate-200 bg-slate-50/70 text-left">
+                            <th className="px-4 py-2.5 font-semibold text-slate-600">Parameter</th>
+                            <th className="px-4 py-2.5 font-semibold text-slate-600">In</th>
+                            <th className="px-4 py-2.5 font-semibold text-slate-600">Required</th>
+                            <th className="px-4 py-2.5 font-semibold text-slate-600">Description</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {ep.params.map((p) => (
+                            <tr key={p.name}>
+                              <td className="px-4 py-2.5 font-mono text-[12.5px] font-semibold text-emerald-700">{p.name}</td>
+                              <td className="px-4 py-2.5 text-slate-500">{p.loc}</td>
+                              <td className="px-4 py-2.5 text-slate-500">{p.required ? "yes" : "no"}</td>
+                              <td className="px-4 py-2.5 text-slate-600">{p.desc}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                    <div>
+                      <p className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Request</p>
+                      <RequestTabs path={examplePath} />
+                    </div>
+                    <div>
+                      <p className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-slate-400">Example response</p>
+                      <CodeBlock code={ep.response(slug, isExchange)} label="json" />
+                    </div>
+                  </div>
+                </section>
+              );
+            })}
+          </div>
+
+          {/* Schemas */}
+          <section id="schemas" className="scroll-mt-24 border-t border-slate-200 pt-12">
+            <h2 className="mb-4 text-2xl font-bold tracking-tight text-slate-900">Data types</h2>
+            <p className="mb-6 max-w-[62ch] text-slate-600">
+              The shapes returned across endpoints. Fields marked <span className="font-mono text-[12.5px] text-violet-600">exchange</span> only appear for exchange providers.
+            </p>
+            <div className="space-y-6">
+              {SCHEMAS.map((s) => (
+                <div key={s.id} id={s.id} className="scroll-mt-24 overflow-hidden rounded-2xl border border-slate-200 bg-white">
+                  <div className="border-b border-slate-100 px-5 py-3.5">
+                    <h3 className="font-bold text-slate-900">{s.name}</h3>
+                    <p className="mt-0.5 text-sm text-slate-500">{s.desc}</p>
+                  </div>
+                  <table className="w-full text-sm">
+                    <tbody className="divide-y divide-slate-100">
+                      {s.fields.map((f) => (
+                        <tr key={f.name}>
+                          <td className="w-44 px-5 py-2.5 align-top font-mono text-[12.5px] font-semibold text-slate-900">{f.name}</td>
+                          <td className="w-40 px-2 py-2.5 align-top font-mono text-[12px] text-slate-400">{f.type}</td>
+                          <td className="px-5 py-2.5 text-slate-600">
+                            {f.desc}
+                            {f.exch && <span className="ml-2 rounded bg-violet-50 px-1.5 py-0.5 font-mono text-[10.5px] text-violet-600">exchange</span>}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Errors */}
+          <section id="errors" className="scroll-mt-24 border-t border-slate-200 pt-12">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-rose-50 text-rose-500"><AlertTriangle size={20} /></span>
+              <h2 className="text-2xl font-bold tracking-tight text-slate-900">Errors</h2>
+            </div>
+            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
               <table className="w-full text-sm">
-                <thead className="border-b border-border">
-                  <tr><th className="th">Status</th><th className="th">Meaning</th></tr>
-                </thead>
-                <tbody className="divide-y divide-border">
-                  {ERRORS.map(([c, d]) => (
-                    <tr key={c}>
-                      <td className="td font-mono text-brand">{c}</td>
-                      <td className="td text-muted">{d}</td>
+                <tbody className="divide-y divide-slate-100">
+                  {ERRORS.map(([code, desc]) => (
+                    <tr key={code}>
+                      <td className="w-20 px-5 py-3 align-top font-mono text-[13px] font-bold text-rose-600">{code}</td>
+                      <td className="px-5 py-3 text-slate-600">{desc}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            <p className="text-sm text-muted mt-3">Errors return <code className="text-brand">{`{ "error": "message" }`}</code>.</p>
+            <p className="mt-3 text-sm text-slate-500">
+              Errors return <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-slate-700">{`{ "error": "message" }`}</code> with the matching status.
+            </p>
           </section>
 
-          <section id="sdks" className="scroll-mt-24 border-t border-border pt-8 pb-10">
-            <h2 className="text-xl font-semibold mb-3">SDKs</h2>
-            <p className="text-muted mb-3">Typed clients with retry + rate-limit-aware backoff:</p>
-            <div className="grid sm:grid-cols-2 gap-3">
-              <Code>{`npm install @zeroapi/sdk
+          {/* SDKs */}
+          <section id="sdks" className="scroll-mt-24 border-t border-slate-200 pt-12 pb-16">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600"><Terminal size={20} /></span>
+              <h2 className="text-2xl font-bold tracking-tight text-slate-900">SDKs</h2>
+            </div>
+            <p className="mb-4 max-w-[62ch] text-slate-600">
+              Typed clients with retries and rate-limit-aware backoff. Or just call the REST API directly with any HTTP client.
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <CodeBlock
+                label="JavaScript"
+                code={`npm i @zeroapi/sdk
 
 import { ZeroApi } from "@zeroapi/sdk";
 const c = new ZeroApi({ apiKey: process.env.ZEROAPI_KEY });
-await c.live("melbet");`}</Code>
-              <Code>{`pip install zeroapi
+const live = await c.live("${slug}");`}
+              />
+              <CodeBlock
+                label="Python"
+                code={`pip install zeroapi
 
 from zeroapi import ZeroApi
 c = ZeroApi(api_key=os.environ["ZEROAPI_KEY"])
-c.live("melbet")`}</Code>
+live = c.live("${slug}")`}
+              />
+            </div>
+            <div className="mt-8 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-sky-50 p-6">
+              <div>
+                <p className="text-lg font-bold text-slate-900">Ready to build?</p>
+                <p className="text-sm text-slate-600">Create a free key and pull live odds in minutes.</p>
+              </div>
+              <Link
+                href="/signup"
+                className="inline-flex items-center gap-2 rounded-full bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white shadow-[0_10px_30px_-10px_rgba(16,185,129,0.7)] transition-all duration-150 hover:bg-emerald-600 active:scale-[0.97]"
+              >
+                Get API key <ChevronRight size={16} />
+              </Link>
             </div>
           </section>
         </main>

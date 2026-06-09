@@ -137,6 +137,46 @@ SIDEBAR_JS = r"""
 }
 """
 
+# Read d247's top "highlights" strip: the promoted row of featured events and
+# special markets (e.g. "FIFA WORLD CUP - WINNER 2026", featured matches). Each
+# is an anchor linking to an event/market detail page. We try the known
+# highlight containers first, then fall back to any event-detail anchor near the
+# top of the page that is NOT inside the main `.bet-table-row` list.
+FEATURED_JS = r"""
+() => {
+    const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+    const evRe = /\/(game-details|market|race|sport-event|event)\/\d+/;
+    const sels = [
+        '[class*="highlight" i] a[href]', '[class*="featured" i] a[href]',
+        '[class*="top-event" i] a[href]', '[class*="topgame" i] a[href]',
+        '[class*="slider" i] a[href]', '[class*="slick" i] a[href]', '.marquee a[href]',
+    ];
+    let anchors = [];
+    for (const s of sels) { try { anchors.push(...document.querySelectorAll(s)); } catch (e) {} }
+    if (anchors.length === 0) {
+        anchors = [...document.querySelectorAll('a[href]')].filter(a => {
+            const h = a.getAttribute('href') || '';
+            if (!evRe.test(h) || a.closest('.bet-table-row')) return false;
+            const r = a.getBoundingClientRect();
+            return r.top >= 0 && r.top < 280 && r.width > 60;   // top strip only
+        });
+    }
+    const out = [], seen = new Set();
+    for (const a of anchors) {
+        const href = a.getAttribute('href') || '';
+        if (!evRe.test(href) || a.closest('.bet-table-row')) continue;
+        const name = clean(a.innerText);
+        if (!name || name.length < 2 || name.length > 90) continue;
+        const key = href || name;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const live = !!a.querySelector('.icon-tv, [class*="tv" i], [class*="live" i]');
+        out.push({ href, name, live });
+    }
+    return out;
+}
+"""
+
 OUTCOME = {"1": "W1", "X": "Draw", "2": "W2"}
 # Team separators in priority order: " v "/" vs "/" @ " (real matches),
 # then " - " (esports / virtual "Team (e) - Team" format).
@@ -546,6 +586,56 @@ async def scrape_sidebar(client, page):
         return 0
 
 
+async def scrape_featured(client, page):
+    """Phase 0.5: read the top 'highlights' strip and flag those events as
+    featured. Real matches/events (which also appear under their sport tab) are
+    flagged by id; pure special-markets/outrights that may not appear elsewhere
+    get a lightweight 'Specials' event shell so they still surface via the API.
+    `clear_featured` makes the promoted set authoritative each pass."""
+    try:
+        items = await page.evaluate(FEATURED_JS)
+    except Exception as e:
+        print(f"  featured eval error: {e}", file=sys.stderr)
+        return 0
+    items = items or []
+    ids, shells, seen_ids = [], [], set()
+    for it in items:
+        href = it.get("href") or ""
+        eid = event_id_from_href(href)
+        if eid is not None and eid not in seen_ids:
+            seen_ids.add(eid)
+            ids.append(eid)
+        name = (it.get("name") or "").strip()
+        # Non-team items are special markets / outrights — model as a single
+        # 'Specials' event so they appear even if no sport tab lists them.
+        if name and not split_teams(name):
+            shells.append({
+                "ext_id": eid, "sport": "Specials", "league": None,
+                "home": name, "away": "", "status": "live" if it.get("live") else "prematch",
+                "home_score": None, "away_score": None, "time": None, "period": None,
+                "suspended": False, "featured": True, "markets": [],
+                "home_logo": None, "away_logo": None, "sport_logo": None, "league_logo": None,
+                "_href": href, "_event": True,
+            })
+    if not ids and not shells:
+        print("  featured: none found")
+        return 0
+    try:
+        r = await client.post(
+            f"{BACKEND_URL}/api/ingest/snapshot",
+            headers={"X-Ingest-Key": INGEST_KEY},
+            json={"source": "d247-featured", "provider": PROVIDER,
+                  "matches": shells, "featured_ids": ids, "clear_featured": True},
+            timeout=30,
+        )
+        r.raise_for_status()
+        print(f"  featured: {len(ids)} flagged, {len(shells)} special-market shells")
+        return len(ids) + len(shells)
+    except Exception as e:
+        print(f"  featured POST failed: {e}", file=sys.stderr)
+        return 0
+
+
 async def scrape_sport(client, page, idx, sport):
     """Phase 1: fast list sweep for one sport. Returns (matches, odds, live_dicts)."""
     if not await open_tab(page, idx):
@@ -626,6 +716,9 @@ async def one_pass(client, page):
     # Phase 0 — scrape the full left "All Sports" sidebar (sports + leagues) and
     # POST it as a sports-tree, so the API exposes the complete catalog.
     await scrape_sidebar(client, page)
+
+    # Phase 0.5 — read the top highlights strip and flag featured events.
+    await scrape_featured(client, page)
 
     labels = await tab_labels(page)
     if not labels:
