@@ -23,6 +23,7 @@ import re
 import signal
 import sys
 import time
+from urllib.parse import urlparse
 
 import httpx
 from playwright.async_api import async_playwright
@@ -590,6 +591,41 @@ async def one_pass(client, page):
 ENGINE_ORDER = [e.strip().lower() for e in os.environ.get(
     "D247_ENGINES", "patchright,rebrowser,camoufox,playwright,nodriver").split(",") if e.strip()]
 
+# Route the browser through a proxy to escape datacenter-IP Cloudflare blocks.
+# Set D247_PROXY, e.g.  http://user:pass@gate.provider.com:7000  (residential).
+# Playwright engines support user:pass auth natively; nodriver gets the host:port
+# via --proxy-server (use an IP-whitelisted proxy endpoint for nodriver auth).
+PROXY = os.environ.get("D247_PROXY", "").strip()
+
+
+def _proxy_url():
+    if not PROXY:
+        return None
+    u = urlparse(PROXY if "://" in PROXY else "http://" + PROXY)
+    return u if u.hostname else None
+
+
+def proxy_playwright():
+    """Playwright/camoufox proxy dict (with auth), or None."""
+    u = _proxy_url()
+    if not u:
+        return None
+    hostport = f"{u.hostname}:{u.port}" if u.port else u.hostname
+    d = {"server": f"{u.scheme}://{hostport}"}
+    if u.username:
+        d["username"] = u.username
+        d["password"] = u.password or ""
+    return d
+
+
+def proxy_chrome_arg():
+    """`--proxy-server=` flag for nodriver/Chrome, or None (no auth — IP-whitelist)."""
+    u = _proxy_url()
+    if not u:
+        return None
+    hostport = f"{u.hostname}:{u.port}" if u.port else u.hostname
+    return f"--proxy-server={u.scheme}://{hostport}"
+
 
 def _js_str(s):
     """Embed a Python string as a safe single-quoted JS string literal."""
@@ -845,7 +881,12 @@ async def open_engine(name, headless):
     # ---- nodriver (native API, wrapped in the adapter) ----
     if name == "nodriver":
         import nodriver as uc
-        browser = await uc.start(headless=headless, browser_args=["--lang=en-US"])
+        nd_args = ["--lang=en-US"]
+        pa = proxy_chrome_arg()
+        if pa:
+            nd_args.append(pa)
+            print(f"[nodriver] using proxy {pa}")
+        browser = await uc.start(headless=headless, browser_args=nd_args)
         if os.path.exists(STATE_FILE):
             try:  # warm-start: load any saved cookies before first navigation
                 data = json.load(open(STATE_FILE))
@@ -874,11 +915,13 @@ async def open_engine(name, headless):
     # ---- camoufox (stealth Firefox; Playwright API) ----
     if name == "camoufox":
         from camoufox.async_api import AsyncCamoufox
-        cf = AsyncCamoufox(headless=headless)
+        px = proxy_playwright()
+        cf = AsyncCamoufox(headless=headless, **({"proxy": px} if px else {}))
         browser = await cf.__aenter__()
         # No UA override — camoufox supplies a consistent fingerprint itself.
         ctx = await browser.new_context(locale="en-US",
-                                        viewport={"width": 1440, "height": 1100}, **state_kw)
+                                        viewport={"width": 1440, "height": 1100},
+                                        **({"proxy": px} if px else {}), **state_kw)
         await ctx.route("**/*", block_assets)
         page = await ctx.new_page()
 
@@ -906,10 +949,12 @@ async def open_engine(name, headless):
     else:
         raise ValueError(f"unknown engine: {name}")
 
+    px = proxy_playwright()
     p = await pw().start()
     browser = await p.chromium.launch(channel="chrome", headless=headless)
     ctx = await browser.new_context(locale="en-US", user_agent=UA,
-                                    viewport={"width": 1440, "height": 1100}, **state_kw)
+                                    viewport={"width": 1440, "height": 1100},
+                                    **({"proxy": px} if px else {}), **state_kw)
     await ctx.route("**/*", block_assets)
     page = await ctx.new_page()
 
@@ -933,7 +978,18 @@ async def run_engine(name, args, stop):
         print(f"[{name}] reusing saved session: {STATE_FILE}")
     page, save, aclose = await open_engine(name, headless)
     try:
-        await demo_login(page)
+        try:
+            await demo_login(page)
+        except Exception:
+            # A failed login often means the saved session is stale/blocked — drop
+            # it so the next engine (or run) starts cold instead of reusing it.
+            if os.path.exists(STATE_FILE):
+                try:
+                    os.remove(STATE_FILE)
+                    print(f"[{name}] removed stale session {STATE_FILE}", file=sys.stderr)
+                except OSError:
+                    pass
+            raise
         try:
             await save(page)
             print(f"[{name}] saved session: {STATE_FILE}")
