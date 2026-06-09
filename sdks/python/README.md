@@ -16,11 +16,15 @@ live = client.live("melbet")
 matches = client.matches("melbet", status="prematch", limit=20)
 detail = client.match("melbet", matches[0]["id"])
 print(detail["odds"])
+
+# Full "All Sports" sidebar tree (sports + nested leagues)
+tree = client.sidebar("diamondexch")
+print([f"{s['name']} ({len(s['leagues'])} leagues)" for s in tree])
 ```
 
 ## Features
 
-- Methods for `providers`, `sports`, `leagues`, `matches`, `match`, `live`, `odds`
+- Methods for `providers`, `sports`, `leagues`, `sidebar`, `matches`, `match`, `live`, `results`, `odds`
 - `X-API-Key` auth handled for you
 - Automatic retry on `429` / `5xx` with rate-limit-aware backoff (honours `Retry-After`)
 - Raises `ZeroApiError` with the HTTP status on failure

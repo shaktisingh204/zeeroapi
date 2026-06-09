@@ -49,6 +49,22 @@ export interface MatchesParams {
   offset?: number;
 }
 
+export interface SidebarLeague {
+  id: number;
+  name: string;
+  country: string | null;
+  match_count: number;
+}
+
+export interface SidebarSport {
+  id: number;
+  name: string;
+  slug: string;
+  match_count: number;
+  logo_url: string | null;
+  leagues: SidebarLeague[];
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export class ZeroApi {
@@ -96,6 +112,10 @@ export class ZeroApi {
   leagues(provider: string, params?: { sport_id?: number }) {
     return this.get<unknown[]>(`/${provider}/leagues`, params);
   }
+  /** Full "All Sports" sidebar tree: every sport with its nested leagues. */
+  sidebar(provider: string) {
+    return this.get<SidebarSport[]>(`/${provider}/sidebar`);
+  }
   matches(provider: string, params?: MatchesParams) {
     return this.get<MatchView[]>(`/${provider}/matches`, params as Record<string, unknown>);
   }
@@ -104,6 +124,10 @@ export class ZeroApi {
   }
   live(provider: string) {
     return this.get<MatchView[]>(`/${provider}/live`);
+  }
+  /** Finished matches with derived winners. */
+  results(provider: string) {
+    return this.get<MatchView[]>(`/${provider}/results`);
   }
   odds(provider: string, matchId: number) {
     return this.get<Odd[]>(`/${provider}/odds/${matchId}`);

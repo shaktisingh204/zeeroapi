@@ -19,6 +19,7 @@ use sha2::Sha256;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/summary", get(summary))
+        .route("/invoices", get(invoices))
         .route("/checkout", post(checkout))
         .route("/portal-session", post(portal_session))
 }
@@ -51,6 +52,26 @@ async fn stripe_post(secret: &str, path: &str, form: &[(&str, String)]) -> AppRe
         let msg = body
             .get("error")
             .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("stripe error");
+        return Err(AppError::BadRequest(format!("stripe: {msg}")));
+    }
+    Ok(body)
+}
+
+async fn stripe_get(secret: &str, path: &str, query: &[(&str, String)]) -> AppResult<Value> {
+    let res = reqwest::Client::new()
+        .get(format!("https://api.stripe.com/v1/{path}"))
+        .basic_auth(secret, Some(""))
+        .query(query)
+        .send()
+        .await
+        .map_err(|e| AppError::Other(e.into()))?;
+    let status = res.status();
+    let body: Value = res.json().await.map_err(|e| AppError::Other(e.into()))?;
+    if !status.is_success() {
+        let msg = body
+            .pointer("/error/message")
             .and_then(|m| m.as_str())
             .unwrap_or("stripe error");
         return Err(AppError::BadRequest(format!("stripe: {msg}")));
@@ -137,6 +158,44 @@ async fn summary(State(state): State<AppState>, cust: CustomerAuth) -> AppResult
         "estimated_cost_cents": estimated,
         "has_payment_method": customer.stripe_subscription_id.is_some(),
     })))
+}
+
+/// Billing history — the customer's Stripe invoices (most recent first).
+/// Returns an empty list if the customer has no Stripe customer id yet.
+async fn invoices(State(state): State<AppState>, cust: CustomerAuth) -> AppResult<Json<Value>> {
+    let secret = stripe_enabled(&state)?;
+    let customer = fetch_customer(&state, cust.customer_id).await?;
+    let Some(stripe_customer) = customer.stripe_customer_id.clone() else {
+        return Ok(Json(json!({ "invoices": [] })));
+    };
+    let body = stripe_get(
+        secret,
+        "invoices",
+        &[("customer", stripe_customer), ("limit", "24".into())],
+    )
+    .await?;
+    let list = body.get("data").cloned().unwrap_or_else(|| json!([]));
+    let invoices: Vec<Value> = list
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|i| {
+                    json!({
+                        "id": i.get("id"),
+                        "number": i.get("number"),
+                        "created": i.get("created"),
+                        "amount_due": i.get("amount_due"),
+                        "amount_paid": i.get("amount_paid"),
+                        "currency": i.get("currency"),
+                        "status": i.get("status"),
+                        "hosted_invoice_url": i.get("hosted_invoice_url"),
+                        "invoice_pdf": i.get("invoice_pdf"),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Json(json!({ "invoices": invoices })))
 }
 
 #[derive(Deserialize)]

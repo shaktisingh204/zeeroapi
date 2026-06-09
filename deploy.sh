@@ -249,7 +249,7 @@ else
   cat > "$BACKEND_ENV" <<EOF
 # --- Server ---
 BIND_ADDR=0.0.0.0:${BACKEND_PORT}
-RUST_LOG=info,melbet_saas_backend=debug
+RUST_LOG=${RUST_LOG:-info}
 
 # --- Database ---
 DATABASE_URL=${DATABASE_URL}
@@ -285,6 +285,14 @@ CORS_ORIGINS=${CORS_ORIGINS}
 PORTAL_BASE_URL=${PORTAL_BASE_URL}
 STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
+
+# --- Email ---
+# With SMTP_URL blank, signup/reset/usage-alert emails are written to
+# MAIL_LOG_PATH (dev). Set SMTP_URL to a relay to send for real.
+APP_NAME=ZeroApi
+EMAIL_FROM=ZeroApi <no-reply@${PUBLIC_HOST}>
+SMTP_URL=
+MAIL_LOG_PATH=/tmp/zeroapi-mail.log
 EOF
   ok "generated backend/.env (random JWT_SECRET + INGEST_KEY)"
 fi
@@ -532,3 +540,11 @@ else
   echo "  Bootstrap complete. Start later with: ./deploy.sh --no-build"
 fi
 echo "  Manual scraper runs:  export INGEST_KEY=\$(grep ^INGEST_KEY= backend/.env | cut -d= -f2) BACKEND_URL=http://localhost:${BACKEND_PORT}"
+if [ "$PUBLIC_HOST" != "localhost" ]; then
+  echo
+  say "Production: put TLS in front"
+  echo "  Use nginx.conf (TLS reverse proxy: / -> :${FRONTEND_PORT}, /api -> :${BACKEND_PORT})."
+  echo "  Then re-run with the https origin so the build + CORS use it:"
+  echo "    sudo PUBLIC_HOST=${PUBLIC_HOST} PUBLIC_API_URL=https://${PUBLIC_HOST}/api \\"
+  echo "         CORS_ORIGINS=https://${PUBLIC_HOST} PORTAL_BASE_URL=https://${PUBLIC_HOST} ./deploy.sh"
+fi

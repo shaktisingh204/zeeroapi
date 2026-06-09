@@ -22,9 +22,10 @@ import type {
   Sport,
   User,
 } from "./types";
+import { API_BASE, ADMIN_TOKEN_KEY } from "./config";
 
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://15.235.234.216:8081/api";
-const TOKEN_KEY = "melbet_token";
+const BASE = API_BASE;
+const TOKEN_KEY = ADMIN_TOKEN_KEY;
 
 // Admin "active provider" — scopes the data views (matches/live/sports/leagues/stats).
 // Empty string = all providers.

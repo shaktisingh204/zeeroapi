@@ -20,6 +20,8 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/signup", post(signup))
         .route("/login", post(login))
+        .route("/forgot", post(forgot_password))
+        .route("/reset", post(reset_password))
         .route("/plans", get(plans)) // public: pricing
         .route("/me", get(me))
         .route("/usage", get(usage))
@@ -102,8 +104,90 @@ async fn signup(
     .fetch_one(&state.pool)
     .await?;
 
+    crate::email::send_welcome(&state.config, &customer.email, customer.name.as_deref()).await;
+
     let token = token_for(&state, &customer)?;
     Ok(Json(AuthResponse { token, customer }))
+}
+
+#[derive(Deserialize)]
+pub struct ForgotRequest {
+    pub email: String,
+}
+
+#[derive(Deserialize)]
+pub struct ResetRequest {
+    pub token: String,
+    pub password: String,
+}
+
+/// SHA-256 hex of a reset token — only the hash is stored.
+fn token_hash(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(token.as_bytes());
+    hex::encode(h.finalize())
+}
+
+/// Step 1 of reset: email a one-time link. Always returns `{ok:true}` so the
+/// endpoint can't be used to probe which emails are registered.
+async fn forgot_password(
+    State(state): State<AppState>,
+    Json(req): Json<ForgotRequest>,
+) -> AppResult<Json<Value>> {
+    let customer: Option<Customer> =
+        sqlx::query_as("SELECT * FROM customers WHERE email = $1 AND is_active")
+            .bind(&req.email)
+            .fetch_optional(&state.pool)
+            .await?;
+
+    if let Some(customer) = customer {
+        // 32 random bytes -> hex token; store only its hash, valid 1 hour.
+        let mut bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+        let token = hex::encode(bytes);
+        let expires = Utc::now() + chrono::Duration::hours(1);
+        sqlx::query(
+            "INSERT INTO password_resets (token_hash, customer_id, expires_at) VALUES ($1, $2, $3)",
+        )
+        .bind(token_hash(&token))
+        .bind(customer.id)
+        .bind(expires)
+        .execute(&state.pool)
+        .await?;
+        crate::email::send_password_reset(&state.config, &customer.email, &token).await;
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Step 2 of reset: consume the token and set the new password.
+async fn reset_password(
+    State(state): State<AppState>,
+    Json(req): Json<ResetRequest>,
+) -> AppResult<Json<Value>> {
+    if req.password.len() < 8 {
+        return Err(AppError::BadRequest("password must be at least 8 characters".into()));
+    }
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT customer_id FROM password_resets
+         WHERE token_hash = $1 AND NOT used AND expires_at > now()",
+    )
+    .bind(token_hash(&req.token))
+    .fetch_optional(&state.pool)
+    .await?;
+    let (customer_id,) = row.ok_or_else(|| AppError::BadRequest("invalid or expired token".into()))?;
+
+    let hash = auth::hash_password(&req.password).map_err(AppError::Other)?;
+    sqlx::query("UPDATE customers SET password_hash = $1, updated_at = now() WHERE id = $2")
+        .bind(hash)
+        .bind(customer_id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query("UPDATE password_resets SET used = TRUE WHERE token_hash = $1")
+        .bind(token_hash(&req.token))
+        .execute(&state.pool)
+        .await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 async fn login(

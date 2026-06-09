@@ -1,8 +1,9 @@
 // Client for the ZeroApi self-serve customer portal (separate auth from admin).
 import type { ApiKey, Customer, Plan, EndpointStat, StatusStat, LatencyPoint } from "./types";
+import { API_BASE as ROOT_API_BASE, CUSTOMER_TOKEN_KEY } from "./config";
 
-const BASE = (process.env.NEXT_PUBLIC_API_URL || "http://15.235.234.216:8081/api").replace(/\/$/, "");
-const TOKEN_KEY = "zeroapi_customer_token";
+const BASE = ROOT_API_BASE;
+const TOKEN_KEY = CUSTOMER_TOKEN_KEY;
 
 export function getCustomerToken(): string | null {
   if (typeof window === "undefined") return null;
@@ -91,6 +92,10 @@ export const portal = {
     req<AuthResponse>("/signup", { method: "POST", body: JSON.stringify({ email, name, password }) }, false),
   login: (email: string, password: string) =>
     req<AuthResponse>("/login", { method: "POST", body: JSON.stringify({ email, password }) }, false),
+  forgotPassword: (email: string) =>
+    req<{ ok: boolean }>("/forgot", { method: "POST", body: JSON.stringify({ email }) }, false),
+  resetPassword: (token: string, password: string) =>
+    req<{ ok: boolean }>("/reset", { method: "POST", body: JSON.stringify({ token, password }) }, false),
   plans: () => req<Plan[]>("/plans", {}, false),
   me: () => req<MeResponse>("/me"),
   usage: () => req<UsageResponse>("/usage"),
@@ -114,10 +119,23 @@ export const portal = {
     req<Customer>("/plan", { method: "POST", body: JSON.stringify({ plan_slug }) }),
   // Billing (Stripe) — wired in Phase 4.
   billingSummary: () => req<BillingSummary>("/billing/summary"),
+  invoices: () => req<{ invoices: Invoice[] }>("/billing/invoices"),
   checkout: (plan_slug: string) =>
     req<{ url: string }>("/billing/checkout", { method: "POST", body: JSON.stringify({ plan_slug }) }),
   billingPortal: () => req<{ url: string }>("/billing/portal-session", { method: "POST" }),
 };
+
+export interface Invoice {
+  id: string;
+  number: string | null;
+  created: number;
+  amount_due: number;
+  amount_paid: number;
+  currency: string;
+  status: string | null;
+  hosted_invoice_url: string | null;
+  invoice_pdf: string | null;
+}
 
 export interface BillingSummary {
   plan: Plan;

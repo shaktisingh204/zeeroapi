@@ -70,6 +70,44 @@ EXTRACT_JS = r"""
 }
 """
 
+# Read d247's left "All Sports" sidebar: every sport (the items carrying the
+# `+` expand toggle) plus any leagues already rendered beneath them. Sports with
+# no current match still appear here, so this gives the COMPLETE sport tree —
+# exactly what the site's sidebar shows — independent of live match coverage.
+SIDEBAR_JS = r"""
+() => {
+    const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+    // Locate the "All Sports" section, then walk up to its list container.
+    const heads = [...document.querySelectorAll('*')].filter(e =>
+        clean(e.innerText) === 'All Sports' && e.children.length <= 2);
+    let box = null;
+    if (heads.length) { box = heads[0]; for (let i = 0; i < 4 && box.parentElement; i++) box = box.parentElement; }
+    if (!box) return [];
+    const out = [];
+    const seen = new Set();
+    for (const li of box.querySelectorAll('li.nav-item.dropdown')) {
+        const a = li.querySelector(':scope > a');
+        if (!a || !a.querySelector('i.fa-plus-square')) continue;   // sports carry the + toggle
+        // top-level only: skip league dropdowns nested inside another sport
+        let p = li.parentElement, nested = false;
+        while (p && p !== box) { if (p.matches && p.matches('li.nav-item.dropdown')) { nested = true; break; } p = p.parentElement; }
+        if (nested) continue;
+        const span = a.querySelector('span');
+        const name = clean(span ? span.innerText : a.innerText);
+        if (!name || name.length > 32 || seen.has(name)) continue;
+        seen.add(name);
+        const leagues = [];
+        const seenL = new Set();
+        li.querySelectorAll('ul a span').forEach(le => {
+            const ln = clean(le.innerText);
+            if (ln && ln !== name && ln.length < 60 && !seenL.has(ln)) { seenL.add(ln); leagues.push(ln); }
+        });
+        out.push({ name, leagues: leagues.slice(0, 50) });
+    }
+    return out;
+}
+"""
+
 OUTCOME = {"1": "W1", "X": "Draw", "2": "W2"}
 # Team separators in priority order: " v "/" vs "/" @ " (real matches),
 # then " - " (esports / virtual "Team (e) - Team" format).
@@ -285,6 +323,41 @@ async def post_snapshot(client, source, matches):
         return 0, 0
 
 
+async def scrape_sidebar(client, page):
+    """Phase 0: read d247's full 'All Sports' sidebar (sports + any rendered
+    leagues) and POST it as a sports-tree so every sport the site lists appears
+    in the API/sidebar, even sports that have no live match right now."""
+    try:
+        sports = await page.evaluate(SIDEBAR_JS)
+    except Exception as e:
+        print(f"  sidebar eval error: {e}", file=sys.stderr)
+        return 0
+    sports = [s for s in (sports or []) if s.get("name")]
+    if not sports:
+        print("  sidebar: no sports found")
+        return 0
+    nodes = [
+        {"name": s["name"], "leagues": [{"name": l} for l in s.get("leagues", [])]}
+        for s in sports
+    ]
+    try:
+        r = await client.post(
+            f"{BACKEND_URL}/api/ingest/snapshot",
+            headers={"X-Ingest-Key": INGEST_KEY},
+            json={"source": "d247-sidebar", "provider": PROVIDER, "matches": [], "sports": nodes},
+            timeout=30,
+        )
+        r.raise_for_status()
+        b = r.json()
+        nl = sum(len(n["leagues"]) for n in nodes)
+        print(f"  sidebar: {len(nodes)} sports, {nl} leagues → "
+              f"{b.get('sports', 0)} sports / {b.get('leagues', 0)} leagues upserted")
+        return len(nodes)
+    except Exception as e:
+        print(f"  sidebar POST failed: {e}", file=sys.stderr)
+        return 0
+
+
 async def scrape_sport(client, page, idx, sport):
     """Phase 1: fast list sweep for one sport. Returns (matches, odds, live_dicts)."""
     if not await open_tab(page, idx):
@@ -355,6 +428,10 @@ async def enrich_detail(client, page, idx, sport, m):
 
 
 async def one_pass(client, page):
+    # Phase 0 — scrape the full left "All Sports" sidebar (sports + leagues) and
+    # POST it as a sports-tree, so the API exposes the complete catalog.
+    await scrape_sidebar(client, page)
+
     labels = await tab_labels(page)
     if not labels:
         print("  no sport tabs found", file=sys.stderr)

@@ -1,0 +1,78 @@
+# Production compose for ZeroApi. Secrets come from the environment / a sibling
+# `.env` file — nothing sensitive is hardcoded here.
+#
+#   cp .env.prod.example .env   # then fill in real secrets
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Put nginx (see nginx.conf) in front of the frontend (3100) + backend (8081)
+# for TLS. The backend runs migrations on boot.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:?set DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASS:?set DB_PASS}
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      BIND_ADDR: 0.0.0.0:8081
+      DATABASE_URL: postgres://${DB_USER}:${DB_PASS}@db:5432/${DB_NAME}
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      INGEST_KEY: ${INGEST_KEY:?set INGEST_KEY}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:?set admin email}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set admin password}
+      CORS_ORIGINS: ${PUBLIC_URL:?set PUBLIC_URL}
+      PORTAL_BASE_URL: ${PUBLIC_URL}
+      APP_NAME: ZeroApi
+      EMAIL_FROM: ${EMAIL_FROM:-ZeroApi <no-reply@zeroapi.local>}
+      SMTP_URL: ${SMTP_URL:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      RUST_LOG: info
+    ports:
+      - "127.0.0.1:8081:8081"
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_URL}/api
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_URL: ${PUBLIC_URL}/api
+    ports:
+      - "127.0.0.1:3100:3000"
+
+volumes:
+  pgdata:
+  redisdata:

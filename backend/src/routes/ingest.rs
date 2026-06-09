@@ -22,11 +22,33 @@ pub struct Snapshot {
     pub source: String,
     #[serde(default = "default_provider")]
     pub provider: String,
+    #[serde(default)]
     pub matches: Vec<IngestMatch>,
+    /// Optional full sidebar/catalog: sports (each with their leagues) that the
+    /// scraper saw, independent of whether any have live matches right now. This
+    /// lets the provider expose its complete "All Sports" tree even for sports
+    /// with zero current matches.
+    #[serde(default)]
+    pub sports: Vec<IngestSportNode>,
 }
 
 fn default_provider() -> String {
     "melbet".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IngestSportNode {
+    pub name: String,
+    pub logo: Option<String>,
+    #[serde(default)]
+    pub leagues: Vec<IngestLeagueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IngestLeagueNode {
+    pub name: String,
+    pub country: Option<String>,
+    pub logo: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,6 +276,53 @@ async fn snapshot(
         }
     }
 
+    // Catalog the full sports-tree / sidebar (sports + leagues with no current
+    // matches). Upserts the same way the match loop does so the public
+    // /sports, /leagues and /sidebar endpoints expose the complete tree.
+    let mut total_sports = 0usize;
+    let mut total_leagues = 0usize;
+    for s in &snap.sports {
+        if s.name.trim().is_empty() {
+            continue;
+        }
+        let sport_id = stable_id(&[provider, &s.name]);
+        sqlx::query(
+            "INSERT INTO sports (id, name, slug, logo_url, provider, updated_at) VALUES ($1,$2,$3,$4,$5, now())
+             ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name,
+                logo_url = COALESCE(EXCLUDED.logo_url, sports.logo_url), updated_at = now()",
+        )
+        .bind(sport_id)
+        .bind(&s.name)
+        .bind(slugify(&s.name))
+        .bind(&s.logo)
+        .bind(provider)
+        .execute(&mut *tx)
+        .await?;
+        total_sports += 1;
+
+        for l in &s.leagues {
+            if l.name.trim().is_empty() {
+                continue;
+            }
+            let lid = stable_id(&[provider, &s.name, &l.name]);
+            sqlx::query(
+                "INSERT INTO leagues (id, sport_id, name, country, logo_url, provider, updated_at) VALUES ($1,$2,$3,$4,$5,$6, now())
+                 ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name,
+                    country = COALESCE(EXCLUDED.country, leagues.country),
+                    logo_url = COALESCE(EXCLUDED.logo_url, leagues.logo_url), updated_at = now()",
+            )
+            .bind(lid)
+            .bind(sport_id)
+            .bind(&l.name)
+            .bind(&l.country)
+            .bind(&l.logo)
+            .bind(provider)
+            .execute(&mut *tx)
+            .await?;
+            total_leagues += 1;
+        }
+    }
+
     tx.commit().await?;
 
     // Redis: bump lifetime counters + publish a live-update ping for SSE.
@@ -295,5 +364,10 @@ async fn snapshot(
         .await;
     }
 
-    Ok(Json(json!({ "matches": total_matches, "odds": total_odds })))
+    Ok(Json(json!({
+        "matches": total_matches,
+        "odds": total_odds,
+        "sports": total_sports,
+        "leagues": total_leagues
+    })))
 }

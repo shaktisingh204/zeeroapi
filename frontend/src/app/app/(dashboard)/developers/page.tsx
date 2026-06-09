@@ -5,10 +5,7 @@ import { Code2, KeyRound, Gauge } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Plan } from "@/lib/types";
 import { PageHeader, Spinner } from "@/components/ui";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://15.235.234.216:8081/api";
-const V1_URL = `${API_BASE}/v1`;
-const SWAGGER_URL = `${V1_URL}/docs`;
+import { API_V1 as V1_URL, DOCS_URL as SWAGGER_URL } from "@/lib/config";
 
 const ENDPOINTS: { method: string; path: string; desc: string }[] = [
   { method: "GET", path: "/v1/providers", desc: "List available data providers." },

@@ -4,6 +4,7 @@ mod auth;
 mod cache;
 mod config;
 mod db;
+mod email;
 mod error;
 mod jobs;
 mod models;
@@ -66,6 +67,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Auto-result settler: finish ended matches + derive winners from final scores.
     jobs::scheduler::spawn_results(state.clone());
+
+    // Usage-alert emails (crossing alert_threshold% of monthly quota).
+    jobs::scheduler::spawn_usage_alerts(state.clone());
+
+    // Stripe subscription reconciliation (covers missed webhooks). No-op without Stripe.
+    jobs::scheduler::spawn_billing_sync(state.clone());
 
     // ---- CORS ----
     let mut cors = CorsLayer::new()

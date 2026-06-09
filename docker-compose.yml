@@ -21,7 +21,9 @@ services:
       db:
         condition: service_healthy
     environment:
-      BIND_ADDR: 0.0.0.0:8080
+      # Canonical backend port is 8081 (matches deploy.sh, ecosystem.config.cjs,
+      # the SDK defaults, and frontend/src/lib/config.ts).
+      BIND_ADDR: 0.0.0.0:8081
       DATABASE_URL: postgres://melbet:melbet@db:5432/melbet
       JWT_SECRET: change-me-to-a-long-random-secret-string-please
       MELBET_BASE_URL: https://india.melbet.com
@@ -30,14 +32,14 @@ services:
       CORS_ORIGINS: http://localhost:3000
       RUST_LOG: info,melbet_saas_backend=debug
     ports:
-      - "8080:8080"
+      - "8081:8081"
 
   frontend:
     build: ./frontend
     depends_on:
       - backend
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8080/api
+      NEXT_PUBLIC_API_URL: http://localhost:8081/api
     ports:
       - "3000:3000"
 

@@ -188,6 +188,53 @@ Surfaced at `GET /api/v1/{provider}/results` and the admin Matches "Winner" colu
 
 ---
 
+## Deploy (one command)
+
+`deploy.sh` bootstraps and runs the whole stack (backend + frontend + scrapers) under
+PM2 — it creates the Postgres role/db, generates secrets into `backend/.env`, builds
+everything, and starts it with health checks.
+
+```bash
+# local
+NO_SUDO=1 ./deploy.sh --with-scrapers
+
+# on a server (bake the public origin into the build + CORS)
+sudo PUBLIC_HOST=your-domain.example \
+     PUBLIC_API_URL=https://your-domain.example/api \
+     CORS_ORIGINS=https://your-domain.example \
+     PORTAL_BASE_URL=https://your-domain.example ./deploy.sh --with-scrapers
+
+./deploy.sh --stop          # tear down
+```
+
+Re-runs are safe (secrets and the DB are preserved). melbet is supervised by the
+backend; the other six scrapers run under PM2 (`pm2 status` / `pm2 logs`).
+
+## Production (TLS)
+
+Terminate HTTPS with **nginx** in front of the frontend (`:3100`) and backend (`:8081`):
+
+```bash
+# edit server_name + cert paths, then:
+sudo cp nginx.conf /etc/nginx/sites-available/zeroapi
+sudo ln -s /etc/nginx/sites-available/zeroapi /etc/nginx/sites-enabled/
+sudo certbot --nginx -d your-domain.example     # Let's Encrypt certs
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+**Docker alternative:** `cp .env.prod.example .env`, fill in real secrets, then
+`docker compose -f docker-compose.prod.yml up -d --build` (Postgres + Redis +
+backend + frontend, secrets from `.env`, ports bound to localhost for nginx).
+
+**Production checklist**
+- Strong `JWT_SECRET` / `INGEST_KEY` (deploy.sh generates these; rotate the bootstrap admin password).
+- `PUBLIC_*` / `CORS_ORIGINS` set to the real https origin.
+- TLS via nginx (above); `STRIPE_*` keys for live billing; `SMTP_URL` for real email
+  (otherwise mail is written to `MAIL_LOG_PATH`).
+- `pm2 startup` once so the stack survives reboots.
+
+---
+
 ## Project structure
 
 ```

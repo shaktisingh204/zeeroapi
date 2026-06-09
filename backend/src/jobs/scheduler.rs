@@ -198,3 +198,122 @@ async fn enabled(state: &AppState) -> bool {
             .flatten();
     val.map(|v| v == "true").unwrap_or(true)
 }
+
+/// Usage-alert emails. Every 10 minutes, any customer who has crossed their
+/// `alert_threshold` percentage of the monthly quota gets one email — at most
+/// once per calendar month (tracked by `customers.alerted_period`).
+pub fn spawn_usage_alerts(state: AppState) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let mut ticker = tokio::time::interval(Duration::from_secs(600));
+        loop {
+            ticker.tick().await;
+            if let Err(e) = run_usage_alerts(&state).await {
+                tracing::warn!(error = %e, "usage-alert job failed");
+            }
+        }
+    });
+    tracing::info!("usage-alert email loop started");
+}
+
+async fn run_usage_alerts(state: &AppState) -> anyhow::Result<()> {
+    let period = chrono::Utc::now().format("%Y-%m").to_string();
+    // Customers whose plan has a finite quota and who opted into alerts.
+    let rows: Vec<(uuid::Uuid, String, Option<String>, i32, i64, i64)> = sqlx::query_as(
+        "SELECT c.id, c.email, c.alerted_period,
+                c.alert_threshold::int AS threshold,
+                p.monthly_quota::bigint AS quota,
+                COALESCE((SELECT SUM(count) FROM usage_rollup u
+                          WHERE u.customer_id = c.id
+                            AND u.day >= date_trunc('month', current_date)::date), 0)::bigint AS used
+         FROM customers c JOIN plans p ON p.slug = c.plan_slug
+         WHERE c.is_active AND p.monthly_quota > 0 AND COALESCE(c.alert_threshold, 0) > 0",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    for (id, email, alerted_period, threshold, quota, used) in rows {
+        if quota <= 0 || threshold <= 0 {
+            continue;
+        }
+        let pct = used * 100 / quota;
+        if pct >= threshold as i64 && alerted_period.as_deref() != Some(period.as_str()) {
+            crate::email::send_usage_alert(&state.config, &email, pct, used, quota).await;
+            let _ = sqlx::query("UPDATE customers SET alerted_period = $1 WHERE id = $2")
+                .bind(&period)
+                .bind(id)
+                .execute(&state.pool)
+                .await;
+            tracing::info!(%email, pct, "usage-alert email sent");
+        }
+    }
+    Ok(())
+}
+
+/// Stripe subscription reconciliation. Every 30 minutes, re-sync each customer's
+/// local `subscription_status` with Stripe (covers webhooks we may have missed).
+/// No-op when Stripe is not configured.
+pub fn spawn_billing_sync(state: AppState) {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(45)).await;
+        let mut ticker = tokio::time::interval(Duration::from_secs(1800));
+        loop {
+            ticker.tick().await;
+            if let Err(e) = reconcile_billing(&state).await {
+                tracing::warn!(error = %e, "billing reconciliation failed");
+            }
+        }
+    });
+    tracing::info!("billing reconciliation loop started");
+}
+
+async fn reconcile_billing(state: &AppState) -> anyhow::Result<()> {
+    let secret = state.config.stripe_secret_key.clone();
+    if secret.is_empty() {
+        return Ok(()); // Stripe not configured — nothing to reconcile.
+    }
+    let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT id, stripe_subscription_id FROM customers
+         WHERE stripe_subscription_id IS NOT NULL",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let client = reqwest::Client::new();
+    for (id, sub_id) in rows {
+        let Ok(res) = client
+            .get(format!("https://api.stripe.com/v1/subscriptions/{sub_id}"))
+            .basic_auth(&secret, Some(""))
+            .send()
+            .await
+        else {
+            continue;
+        };
+        let Ok(body) = res.json::<serde_json::Value>().await else {
+            continue;
+        };
+        if let Some(status) = body.get("status").and_then(|v| v.as_str()) {
+            // On a hard cancel fall back to free; otherwise just write the status.
+            let _ = if status == "canceled" {
+                sqlx::query(
+                    "UPDATE customers SET subscription_status = 'canceled', plan_slug = 'free',
+                     stripe_subscription_id = NULL, updated_at = now()
+                     WHERE id = $1 AND subscription_status IS DISTINCT FROM 'canceled'",
+                )
+                .bind(id)
+                .execute(&state.pool)
+                .await
+            } else {
+                sqlx::query(
+                    "UPDATE customers SET subscription_status = $1, updated_at = now()
+                     WHERE id = $2 AND subscription_status IS DISTINCT FROM $1",
+                )
+                .bind(status)
+                .bind(id)
+                .execute(&state.pool)
+                .await
+            };
+        }
+    }
+    Ok(())
+}

@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
         // Canonical: provider in the path — /api/v1/{provider}/live
         .route("/:provider/sports", get(sports))
         .route("/:provider/leagues", get(leagues))
+        .route("/:provider/sidebar", get(sidebar))
         .route("/:provider/matches", get(matches))
         .route("/:provider/matches/:id", get(match_detail))
         .route("/:provider/live", get(live))
@@ -32,6 +33,7 @@ pub fn router() -> Router<AppState> {
         // Forgiving alternative: provider as a query param — /api/v1/live?provider=melbet
         .route("/sports", get(sports_q))
         .route("/leagues", get(leagues_q))
+        .route("/sidebar", get(sidebar_q))
         .route("/matches", get(matches_q))
         .route("/matches/:id", get(match_detail_q))
         .route("/live", get(live_q))
@@ -176,6 +178,54 @@ async fn leagues(State(state): State<AppState>, client: ApiClient, Path(provider
 async fn leagues_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ListQuery>)
     -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
     leagues_core(&state, &client, &need_provider(q.provider)?, q.sport_id).await
+}
+
+// ---- sidebar (full sports tree: sports each with their nested leagues) ----
+async fn sidebar_core(state: &AppState, client: &ApiClient, provider: &str)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    require_capability(state, provider, "sports").await?;
+    let sports: Vec<(i64, String, String, i32, Option<String>)> = sqlx::query_as(
+        "SELECT id, name, slug, match_count, logo_url FROM sports WHERE provider = $1
+         ORDER BY match_count DESC, name ASC LIMIT 500",
+    )
+    .bind(provider)
+    .fetch_all(&state.pool)
+    .await?;
+    let leagues: Vec<(i64, i64, String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT l.sport_id, l.id, l.name, l.country, COUNT(m.id) AS match_count
+         FROM leagues l LEFT JOIN matches m ON m.league_id = l.id
+         WHERE l.provider = $1
+         GROUP BY l.id ORDER BY match_count DESC, l.name ASC",
+    )
+    .bind(provider)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut by_sport: std::collections::HashMap<i64, Vec<Value>> = std::collections::HashMap::new();
+    for (sport_id, id, name, country, match_count) in leagues {
+        by_sport.entry(sport_id).or_default().push(
+            json!({ "id": id, "name": name, "country": country, "match_count": match_count }),
+        );
+    }
+    let out: Vec<Value> = sports
+        .into_iter()
+        .map(|(id, name, slug, match_count, logo_url)| {
+            json!({
+                "id": id, "name": name, "slug": slug,
+                "match_count": match_count, "logo_url": logo_url,
+                "leagues": by_sport.remove(&id).unwrap_or_default()
+            })
+        })
+        .collect();
+    Ok((rate_headers(client), Json(out)))
+}
+async fn sidebar(State(state): State<AppState>, client: ApiClient, Path(provider): Path<String>)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    sidebar_core(&state, &client, &provider).await
+}
+async fn sidebar_q(State(state): State<AppState>, client: ApiClient, Query(q): Query<ProviderQuery>)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    sidebar_core(&state, &client, &need_provider(q.provider)?).await
 }
 
 const MATCH_SELECT: &str = "
@@ -382,6 +432,13 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
                 "parameters":[{"name":"sport_id","in":"query","schema":{"type":"integer"}}],
                 "responses": {"200": resp("Leagues list",
                     &json!([{"id":2542291,"name":"Indian Premier League","sport_name":"Cricket","country":"India","match_count":10}]))}}}));
+        }
+        if caps.iter().any(|c| c == "sports") {
+            paths.insert(format!("/{pv}/sidebar"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — sidebar (sports with nested leagues)", p.name),
+                "responses": {"200": resp("Full \"All Sports\" tree",
+                    &json!([{"id":4471626188_i64,"name":"Cricket","slug":"cricket","match_count":12,"logo_url":null,
+                        "leagues":[{"id":2542291,"name":"Indian Premier League","country":"India","match_count":10}]}]))}}}));
         }
         if caps.iter().any(|c| c == "matches") {
             paths.insert(format!("/{pv}/matches"), json!({"get": {"tags":[tag.clone()],

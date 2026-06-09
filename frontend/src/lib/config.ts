@@ -1,6 +1,8 @@
-// Single source of truth for API base URLs + storage keys (was duplicated
-// across api.ts, portal.ts, developers/page.tsx, status/changelog pages).
-export const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "http://15.235.234.216:8081/api").replace(/\/$/, "");
+// Single source of truth for API base URLs + storage keys. Every other module
+// (api.ts, portal.ts, status/changelog/developers pages) imports from here —
+// do NOT re-inline the base URL elsewhere.
+// Override per-deployment with NEXT_PUBLIC_API_URL (e.g. https://api.zeroapi.example/api).
+export const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8081/api").replace(/\/$/, "");
 export const API_V1 = `${API_BASE}/v1`;
 export const DOCS_URL = `${API_V1}/docs`;
 

@@ -36,6 +36,8 @@ import time
 import httpx
 from playwright.sync_api import sync_playwright
 
+from _ingest import sidebar_payload, tree_from_matches
+
 
 def hq_logo(url):
     """Strip the CDN `/resized/sizeNN/` thumbnail segment for the full-res original."""
@@ -289,6 +291,7 @@ def post_chunks(client, source, matches):
 
 def run(headed=False, dry_run=False):
     grand_m = grand_o = 0
+    all_matches = []
     client = None if dry_run else httpx.Client(http2=False)
     try:
         with sync_playwright() as p:
@@ -300,6 +303,7 @@ def run(headed=False, dry_run=False):
                 try:
                     print(f"scraping {url} ...")
                     matches = scrape_once(page, url, status)
+                    all_matches.extend(matches)
                     odds = sum(len(m["markets"]) for m in matches)
                     if dry_run:
                         print(f"  [{source}] extracted {len(matches)} matches, {odds} odds")
@@ -321,6 +325,28 @@ def run(headed=False, dry_run=False):
     finally:
         if client is not None:
             client.close()
+
+    # Sidebar tree: aggregate the sports + leagues seen across all pages so
+    # /api/v1/{provider}/sidebar exposes this provider's tree too.
+    tree = tree_from_matches(all_matches)
+    tree_leagues = sum(len(s["leagues"]) for s in tree)
+    if dry_run:
+        print(f"  [sidebar] would post {len(tree)} sports / {tree_leagues} leagues")
+    else:
+        # The main client is closed above; use a fresh short-lived one for the tree.
+        try:
+            with httpx.Client(http2=False) as c:
+                r = c.post(
+                    f"{BACKEND_URL}/api/ingest/snapshot",
+                    headers={"X-Ingest-Key": INGEST_KEY},
+                    json=sidebar_payload(PROVIDER, tree),
+                    timeout=30,
+                )
+                r.raise_for_status()
+                b = r.json()
+                print(f"  [sidebar] {b.get('sports', 0)} sports / {b.get('leagues', 0)} leagues")
+        except Exception as e:
+            print(f"  sidebar POST failed: {e}", file=sys.stderr)
     return grand_m, grand_o
 
 

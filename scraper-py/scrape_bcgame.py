@@ -25,6 +25,8 @@ import time
 
 import httpx
 
+from _ingest import sidebar_payload, tree_from_matches, merge_empty_sports
+
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8081").rstrip("/")
 INGEST_KEY = os.environ.get("INGEST_KEY", "dev-ingest-key")
 PROVIDER = "bcgame"
@@ -205,6 +207,8 @@ def post_chunks(client, source, matches):
 
 def one_pass(client, markets):
     grand_m = grand_o = 0
+    all_matches = []
+    sport_names = set()
     for kind, status in (("prematch", "prematch"), ("live", "live")):
         sports, tours, events = collect(client, kind)
         matches = build_matches(events, sports, tours, markets, status)
@@ -212,6 +216,26 @@ def one_pass(client, markets):
         print(f"  [{kind}] {len(events)} events → {len(matches)} matches, {m} upserted, {o} odds")
         grand_m += m
         grand_o += o
+        all_matches.extend(matches)
+        for s in sports.values():
+            n = (s.get("name") or "").strip()
+            if n:
+                sport_names.add(n)
+    # Sidebar tree: leagues from the matches we built + any catalog sport with
+    # no current events (so the full "All Sports" list shows up in /sidebar).
+    tree = merge_empty_sports(tree_from_matches(all_matches), sport_names)
+    try:
+        r = client.post(
+            f"{BACKEND_URL}/api/ingest/snapshot",
+            headers={"X-Ingest-Key": INGEST_KEY},
+            json=sidebar_payload(PROVIDER, tree),
+            timeout=30,
+        )
+        r.raise_for_status()
+        b = r.json()
+        print(f"  [sidebar] {b.get('sports', 0)} sports / {b.get('leagues', 0)} leagues")
+    except Exception as e:
+        print(f"  sidebar POST failed: {e}", file=sys.stderr)
     return grand_m, grand_o
 
 

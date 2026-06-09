@@ -18,11 +18,15 @@ const live = await client.live("melbet");
 const matches = await client.matches("melbet", { status: "prematch", limit: 20 });
 const detail = await client.match("melbet", matches[0].id);
 console.log(detail.odds);
+
+// Full "All Sports" sidebar tree (sports + nested leagues)
+const tree = await client.sidebar("diamondexch");
+console.log(tree.map((s) => `${s.name} (${s.leagues.length} leagues)`));
 ```
 
 ## Features
 
-- Typed methods for `providers`, `sports`, `leagues`, `matches`, `match`, `live`, `odds`
+- Typed methods for `providers`, `sports`, `leagues`, `sidebar`, `matches`, `match`, `live`, `results`, `odds`
 - `X-API-Key` auth handled for you
 - Automatic retry on `429` / `5xx` with rate-limit-aware backoff (honours `Retry-After`)
 - Throws `ZeroApiError` with the HTTP status on failure

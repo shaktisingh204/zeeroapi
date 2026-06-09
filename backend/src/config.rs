@@ -34,6 +34,14 @@ pub struct Config {
     pub stripe_secret_key: String,
     pub stripe_webhook_secret: String,
     pub portal_base_url: String,
+
+    // Email. With no SMTP_URL set (the default, dev), messages are appended to
+    // `mail_log_path` instead of being sent — so signup/reset/alerts work with
+    // zero config locally.
+    pub app_name: String,
+    pub email_from: String,
+    pub smtp_url: String,
+    pub mail_log_path: String,
 }
 
 impl Config {
@@ -81,6 +89,11 @@ impl Config {
             portal_base_url: get("PORTAL_BASE_URL", "http://localhost:3000")
                 .trim_end_matches('/')
                 .to_string(),
+
+            app_name: get("APP_NAME", "ZeroApi"),
+            email_from: get("EMAIL_FROM", "ZeroApi <no-reply@zeroapi.local>"),
+            smtp_url: get("SMTP_URL", ""),
+            mail_log_path: get("MAIL_LOG_PATH", "/tmp/zeroapi-mail.log"),
         })
     }
 }

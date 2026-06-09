@@ -67,6 +67,10 @@ class ZeroApi:
     def leagues(self, provider: str, sport_id: Optional[int] = None) -> list:
         return self._get(f"/{provider}/leagues", {"sport_id": sport_id})
 
+    def sidebar(self, provider: str) -> list:
+        """Full 'All Sports' sidebar tree: every sport with its nested leagues."""
+        return self._get(f"/{provider}/sidebar")
+
     def matches(self, provider: str, **params) -> list:
         return self._get(f"/{provider}/matches", params)
 
@@ -75,6 +79,10 @@ class ZeroApi:
 
     def live(self, provider: str) -> list:
         return self._get(f"/{provider}/live")
+
+    def results(self, provider: str) -> list:
+        """Finished matches with derived winners."""
+        return self._get(f"/{provider}/results")
 
     def odds(self, provider: str, match_id: int) -> list:
         return self._get(f"/{provider}/odds/{match_id}")

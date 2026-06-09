@@ -37,6 +37,8 @@ import time
 
 import httpx
 
+from _ingest import sidebar_payload
+
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8081").rstrip("/")
 INGEST_KEY = os.environ.get("INGEST_KEY", "dev-ingest-key")
 PROVIDER = "1win"
@@ -175,6 +177,37 @@ def extract(doc):
     return out
 
 
+def feed_tree(doc):
+    """Whole feed → sports-tree (every sport + its leagues/categories), incl.
+    sports whose individual matches were filtered out of `extract`."""
+    tree = {}
+    for sport in doc.get("feed") or []:
+        sname = (sport.get("sportName") or "Other").strip()
+        leagues = tree.setdefault(sname, set())
+        for m in sport.get("matches") or []:
+            lg = (m.get("categoryName") or m.get("tournamentName") or "").strip()
+            if lg:
+                leagues.add(lg)
+    return [{"name": s, "leagues": [{"name": l} for l in sorted(ls)]}
+            for s, ls in sorted(tree.items())]
+
+
+def post_sidebar(client, tree):
+    try:
+        r = client.post(
+            f"{BACKEND_URL}/api/ingest/snapshot",
+            headers={"X-Ingest-Key": INGEST_KEY},
+            json=sidebar_payload(PROVIDER, tree),
+            timeout=30,
+        )
+        r.raise_for_status()
+        b = r.json()
+        return b.get("sports", 0), b.get("leagues", 0)
+    except Exception as e:
+        print(f"  sidebar POST failed: {e}", file=sys.stderr)
+        return 0, 0
+
+
 def post_chunks(client, source, matches):
     total_m = total_o = 0
     for i in range(0, len(matches), CHUNK):
@@ -198,11 +231,14 @@ def post_chunks(client, source, matches):
 def one_pass(client, dry_run):
     doc = fetch_feed(client)
     matches = extract(doc)
+    tree = feed_tree(doc)
     total_odds = sum(len(m["markets"]) for m in matches)
+    tree_leagues = sum(len(s["leagues"]) for s in tree)
 
     if dry_run:
         print(f"[dry-run] extracted {len(matches)} matches, {total_odds} odds "
-              f"(feed sports: {len(doc.get('feed') or [])})")
+              f"(feed sports: {len(doc.get('feed') or [])}); "
+              f"sports-tree: {len(tree)} sports, {tree_leagues} leagues")
         for m in matches[:3]:
             ex = m["markets"][:3]
             print(f"  · [{m['sport']}] {m['home']} vs {m['away']} "
@@ -215,7 +251,9 @@ def one_pass(client, dry_run):
         return len(matches), total_odds
 
     m, o = post_chunks(client, "1win-live", matches)
-    print(f"[live] {len(matches)} matches extracted → {m} upserted, {o} odds")
+    sp, lg = post_sidebar(client, tree)
+    print(f"[live] {len(matches)} matches extracted → {m} upserted, {o} odds; "
+          f"sidebar {sp} sports / {lg} leagues")
     return m, o
 
 

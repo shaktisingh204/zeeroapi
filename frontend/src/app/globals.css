@@ -4,11 +4,47 @@
 
 :root {
   color-scheme: dark;
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
 }
 
-body {
-  background-color: #0b0e14;
-  color: #e6e9ef;
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    background-color: #0a0c12;
+    /* Ambient depth: two soft emerald/navy radials over the base, plus grain. */
+    background-image: var(--grain),
+      radial-gradient(900px 500px at 12% -8%, rgba(52, 210, 123, 0.06), transparent 60%),
+      radial-gradient(1000px 600px at 110% 0%, rgba(40, 70, 120, 0.10), transparent 55%);
+    background-attachment: fixed;
+    color: #e7eaf1;
+    font-feature-settings: "cv01", "ss01";
+    text-rendering: optimizeLegibility;
+  }
+  /* Tabular figures everywhere data appears, so columns line up. */
+  table,
+  .tabular,
+  [class*="font-mono"] {
+    font-variant-numeric: tabular-nums;
+  }
+  h1, h2, h3 {
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+  p {
+    text-wrap: pretty;
+  }
+  /* Visible keyboard focus everywhere (accessibility). */
+  :focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px #0a0c12, 0 0 0 4px rgba(52, 210, 123, 0.6);
+    border-radius: 6px;
+  }
+  ::selection {
+    background: rgba(52, 210, 123, 0.28);
+    color: #fff;
+  }
 }
 
 /* Thin custom scrollbars */
@@ -17,10 +53,10 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-track {
-  background: #0b0e14;
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #262d3d;
+  background: #252c3b;
   border-radius: 6px;
 }
 ::-webkit-scrollbar-thumb:hover {
@@ -29,28 +65,49 @@ body {
 
 @layer components {
   .card {
-    @apply bg-surface border border-border rounded-xl;
+    @apply bg-surface border border-border rounded-xl shadow-card;
+  }
+  .card-hover {
+    @apply transition-all duration-200 hover:border-border hover:-translate-y-0.5 hover:shadow-pop;
   }
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium
+           transition-all duration-150 active:scale-[0.98]
+           disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
   }
   .btn-primary {
-    @apply btn bg-brand text-black hover:bg-brand-dark;
+    @apply btn bg-brand text-black hover:bg-brand-dark shadow-[0_4px_16px_-6px_rgba(52,210,123,0.5)];
   }
   .btn-ghost {
-    @apply btn bg-surface-2 text-gray-200 hover:bg-border;
+    @apply btn bg-surface-2 text-gray-200 border border-border hover:bg-surface-3 hover:border-muted-2;
+  }
+  .btn-quiet {
+    @apply btn text-muted hover:text-white hover:bg-surface-2;
   }
   .input {
-    @apply w-full rounded-lg bg-surface-2 border border-border px-3 py-2 text-sm text-gray-100 outline-none focus:border-brand placeholder:text-muted;
+    @apply w-full rounded-lg bg-surface-2 border border-border px-3 py-2 text-sm text-gray-100
+           outline-none transition-colors placeholder:text-muted-2
+           focus:border-brand focus:bg-surface-3;
   }
+  /* Squared (not pill) badges — less generic. */
   .badge {
-    @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium;
+    @apply inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium tabular-nums;
+  }
+  .badge-brand {
+    @apply badge bg-brand-soft text-brand;
+  }
+  .badge-muted {
+    @apply badge bg-surface-2 text-muted border border-border;
   }
   .th {
-    @apply text-left text-xs font-semibold uppercase tracking-wide text-muted px-4 py-3;
+    @apply text-left text-[11px] font-semibold uppercase tracking-wider text-muted-2 px-4 py-3;
   }
   .td {
     @apply px-4 py-3 text-sm text-gray-200;
+  }
+  /* Eyebrow label above section headers. */
+  .eyebrow {
+    @apply inline-flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-brand;
   }
 }
 

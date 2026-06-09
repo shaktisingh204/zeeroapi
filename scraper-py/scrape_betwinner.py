@@ -31,6 +31,28 @@ import time
 import httpx
 from playwright.sync_api import sync_playwright
 
+from _ingest import sidebar_payload, tree_from_matches
+
+
+def post_sidebar(tree, dry_run=False):
+    """POST the aggregated sports-tree so /api/v1/{provider}/sidebar is populated."""
+    leagues = sum(len(s["leagues"]) for s in tree)
+    if dry_run:
+        print(f"  [sidebar] would post {len(tree)} sports / {leagues} leagues")
+        return
+    try:
+        r = httpx.post(
+            f"{BACKEND_URL}/api/ingest/snapshot",
+            headers={"X-Ingest-Key": INGEST_KEY},
+            json=sidebar_payload(PROVIDER, tree),
+            timeout=30,
+        )
+        r.raise_for_status()
+        b = r.json()
+        print(f"  [sidebar] {b.get('sports', 0)} sports / {b.get('leagues', 0)} leagues")
+    except Exception as e:
+        print(f"  sidebar POST failed: {e}", file=sys.stderr)
+
 
 def hq_logo(url):
     """Strip the CDN `/resized/sizeNN/` thumbnail segment for the full-res original."""
@@ -299,13 +321,16 @@ def run(headed=False, dry_run=False):
         ctx = browser.new_context(locale="en-US",
                                   viewport={"width": 1600, "height": 1200}, user_agent=UA)
         page = ctx.new_page()
+        all_matches = []
         for url, status, source in TARGETS:
             try:
                 print(f"scraping {url} ...")
                 matches = scrape_once(page, url, status)
+                all_matches.extend(matches)
                 post_snapshot(source, matches, dry_run=dry_run)
             except Exception as e:
                 print(f"  error on {url}: {e}", file=sys.stderr)
+        post_sidebar(tree_from_matches(all_matches), dry_run=dry_run)
         browser.close()
 
 

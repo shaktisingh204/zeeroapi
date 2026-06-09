@@ -1,6 +1,6 @@
 {
   "name": "@zeroapi/sdk",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Official TypeScript SDK for the ZeroApi sports-odds API",
   "type": "module",
   "main": "dist/index.js",
