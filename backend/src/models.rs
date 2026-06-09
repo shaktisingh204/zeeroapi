@@ -162,6 +162,8 @@ pub struct Plan {
     pub name: String,
     pub price_cents: i32,
     pub rate_limit_per_min: i32,
+    /// Optional per-second cap; when Some(n > 0) it overrides the per-minute limit.
+    pub rate_limit_per_sec: Option<i32>,
     pub monthly_quota: i32,
     pub features: serde_json::Value,
     pub sort_order: i32,

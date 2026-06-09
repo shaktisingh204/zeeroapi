@@ -68,7 +68,7 @@ impl FromRequestParts<AppState> for ApiClient {
             "SELECT k.id AS api_key_id, c.id AS customer_id,
                     k.allowed_providers, k.allowed_ips, k.expires_at,
                     p.slug, p.name, p.price_cents, p.rate_limit_per_min,
-                    p.monthly_quota, p.features, p.sort_order,
+                    p.rate_limit_per_sec, p.monthly_quota, p.features, p.sort_order,
                     p.stripe_price_id, p.metered_price_id
              FROM api_keys k
              JOIN customers c ON c.id = k.customer_id
@@ -130,11 +130,20 @@ impl FromRequestParts<AppState> for ApiClient {
         let mut remaining = plan.rate_limit_per_min as i64;
         if let Some(cache) = &state.cache {
             let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-            let minute = now / 60;
-            let rl_key = format!("rl:{hash}:{minute}");
-            let used = cache.incr_ex(&rl_key, 60).await;
-            remaining = (plan.rate_limit_per_min as i64 - used).max(0);
-            if used > plan.rate_limit_per_min as i64 {
+            // A per-second limit (when set) overrides the per-minute one: same
+            // counter pattern, just a 1-second window keyed on the current second.
+            let (limit, used) = match plan.rate_limit_per_sec {
+                Some(per_sec) if per_sec > 0 => {
+                    let rl_key = format!("rls:{hash}:{now}");
+                    (per_sec as i64, cache.incr_ex(&rl_key, 1).await)
+                }
+                _ => {
+                    let rl_key = format!("rl:{hash}:{}", now / 60);
+                    (plan.rate_limit_per_min as i64, cache.incr_ex(&rl_key, 60).await)
+                }
+            };
+            remaining = (limit - used).max(0);
+            if used > limit {
                 return Err(AppError::TooManyRequests);
             }
 
@@ -186,6 +195,7 @@ struct ApiAuthRow {
     name: String,
     price_cents: i32,
     rate_limit_per_min: i32,
+    rate_limit_per_sec: Option<i32>,
     monthly_quota: i32,
     features: serde_json::Value,
     sort_order: i32,
@@ -202,6 +212,7 @@ impl From<ApiAuthRow> for (Uuid, Plan) {
                 name: r.name,
                 price_cents: r.price_cents,
                 rate_limit_per_min: r.rate_limit_per_min,
+                rate_limit_per_sec: r.rate_limit_per_sec,
                 monthly_quota: r.monthly_quota,
                 features: r.features,
                 sort_order: r.sort_order,

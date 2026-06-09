@@ -341,6 +341,9 @@ pub struct PlanFields {
     pub price_cents: i32,
     #[serde(default)]
     pub rate_limit_per_min: i32,
+    /// Optional per-second cap; when set (> 0) it overrides rate_limit_per_min.
+    #[serde(default)]
+    pub rate_limit_per_sec: Option<i32>,
     #[serde(default)]
     pub monthly_quota: i32,
     #[serde(default)]
@@ -375,13 +378,14 @@ async fn create_plan(
     }
     let p: Plan = sqlx::query_as(
         "INSERT INTO plans \
-            (slug, name, price_cents, rate_limit_per_min, monthly_quota, features, sort_order, stripe_price_id, metered_price_id) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
+            (slug, name, price_cents, rate_limit_per_min, rate_limit_per_sec, monthly_quota, features, sort_order, stripe_price_id, metered_price_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *",
     )
     .bind(&slug)
     .bind(f.name.trim())
     .bind(f.price_cents)
     .bind(f.rate_limit_per_min)
+    .bind(f.rate_limit_per_sec.filter(|n| *n > 0))
     .bind(f.monthly_quota)
     .bind(json!(f.features))
     .bind(f.sort_order)
@@ -413,14 +417,15 @@ async fn update_plan(
     }
     let updated: Option<Plan> = sqlx::query_as(
         "UPDATE plans SET \
-            name = $2, price_cents = $3, rate_limit_per_min = $4, monthly_quota = $5, \
-            features = $6, sort_order = $7, stripe_price_id = $8, metered_price_id = $9 \
+            name = $2, price_cents = $3, rate_limit_per_min = $4, rate_limit_per_sec = $5, \
+            monthly_quota = $6, features = $7, sort_order = $8, stripe_price_id = $9, metered_price_id = $10 \
          WHERE slug = $1 RETURNING *",
     )
     .bind(&slug)
     .bind(f.name.trim())
     .bind(f.price_cents)
     .bind(f.rate_limit_per_min)
+    .bind(f.rate_limit_per_sec.filter(|n| *n > 0))
     .bind(f.monthly_quota)
     .bind(json!(f.features))
     .bind(f.sort_order)

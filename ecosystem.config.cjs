@@ -54,7 +54,9 @@ const INGEST_KEY = process.env.INGEST_KEY || backendEnv.INGEST_KEY || 'dev-inges
 // egress through an India residential proxy. Keep the secret OUT of git — set it
 // in backend/.env (gitignored) as a STICKY session URL, e.g.:
 //   D247_PROXY=http://USER_area-IN_session-d247prod1_life-30:PASS@proxy.smartproxy.net:3120
-const D247_PROXY = process.env.D247_PROXY || backendEnv.D247_PROXY || '';
+// backend/.env is AUTHORITATIVE here (checked first): a stray `export D247_PROXY=...`
+// left in the shell must NOT shadow the real value — that footgun broke a deploy once.
+const D247_PROXY = backendEnv.D247_PROXY || process.env.D247_PROXY || '';
 
 const scraperEnv = { BACKEND_URL, INGEST_KEY };
 

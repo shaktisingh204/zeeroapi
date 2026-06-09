@@ -21,7 +21,7 @@ interface FormState {
   slug: string;
   name: string;
   priceDollars: string;
-  rate_limit_per_min: string;
+  ratePerSec: string;
   monthly_quota: string;
   featuresText: string;
   sort_order: string;
@@ -29,11 +29,18 @@ interface FormState {
   metered_price_id: string;
 }
 
+// Rate limits are configured per-second. Legacy plans that only have a
+// per-minute value are shown as their per-second equivalent (÷60, min 1).
+function perSecOf(p: Pick<Plan, "rate_limit_per_sec" | "rate_limit_per_min">): number {
+  if (p.rate_limit_per_sec && p.rate_limit_per_sec > 0) return p.rate_limit_per_sec;
+  return Math.max(1, Math.round(p.rate_limit_per_min / 60));
+}
+
 const EMPTY_FORM: FormState = {
   slug: "",
   name: "",
   priceDollars: "0",
-  rate_limit_per_min: "60",
+  ratePerSec: "1",
   monthly_quota: "10000",
   featuresText: "",
   sort_order: "0",
@@ -46,7 +53,7 @@ function planToForm(p: Plan): FormState {
     slug: p.slug,
     name: p.name,
     priceDollars: (p.price_cents / 100).toString(),
-    rate_limit_per_min: p.rate_limit_per_min.toString(),
+    ratePerSec: perSecOf(p).toString(),
     monthly_quota: p.monthly_quota.toString(),
     featuresText: (p.features ?? []).join("\n"),
     sort_order: p.sort_order.toString(),
@@ -111,10 +118,15 @@ export default function PlansPage() {
       return;
     }
 
+    // Rate is configured per-second; persist that as authoritative and keep
+    // rate_limit_per_min consistent (= ×60) for display/MRR math.
+    const rate = Math.max(1, parseInt(form.ratePerSec, 10) || 1);
+
     const body = {
       name: form.name.trim(),
       price_cents: Math.max(0, Math.round((parseFloat(form.priceDollars) || 0) * 100)),
-      rate_limit_per_min: parseInt(form.rate_limit_per_min, 10) || 0,
+      rate_limit_per_min: rate * 60,
+      rate_limit_per_sec: rate,
       monthly_quota: parseInt(form.monthly_quota, 10) || 0,
       features: form.featuresText
         .split("\n")
@@ -233,13 +245,13 @@ export default function PlansPage() {
               />
             </Field>
 
-            <Field label="Rate limit (req/min)">
+            <Field label="Rate limit (req/sec)" hint="requests allowed per second">
               <input
                 type="number"
-                min={0}
+                min={1}
                 className="input mt-1 w-full"
-                value={form.rate_limit_per_min}
-                onChange={(e) => set("rate_limit_per_min", e.target.value)}
+                value={form.ratePerSec}
+                onChange={(e) => set("ratePerSec", e.target.value)}
               />
             </Field>
 
@@ -314,7 +326,7 @@ export default function PlansPage() {
               <dl className="mt-4 space-y-2 text-sm">
                 <div className="flex items-center justify-between">
                   <dt className="text-muted">Rate limit</dt>
-                  <dd className="font-medium text-white">{plan.rate_limit_per_min}/min</dd>
+                  <dd className="font-medium text-white">{perSecOf(plan)}/sec</dd>
                 </div>
                 <div className="flex items-center justify-between">
                   <dt className="text-muted">Monthly quota</dt>

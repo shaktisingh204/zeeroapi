@@ -67,8 +67,16 @@ async fn v1_fallback() -> AppResult<Json<Value>> {
 
 fn rate_headers(c: &ApiClient) -> HeaderMap {
     let mut h = HeaderMap::new();
-    if let Ok(v) = c.plan.rate_limit_per_min.to_string().parse() {
+    // Report whichever window is actually enforced (per-second overrides per-minute).
+    let (limit, window) = match c.plan.rate_limit_per_sec {
+        Some(per_sec) if per_sec > 0 => (per_sec, "1"),
+        _ => (c.plan.rate_limit_per_min, "60"),
+    };
+    if let Ok(v) = limit.to_string().parse() {
         h.insert("x-ratelimit-limit", v);
+    }
+    if let Ok(v) = window.parse() {
+        h.insert("x-ratelimit-window-seconds", v);
     }
     if let Ok(v) = c.remaining.to_string().parse() {
         h.insert("x-ratelimit-remaining", v);

@@ -439,26 +439,36 @@ ensure_pm2() {
 start_with_pm2() {
   # Pass ports + the real INGEST_KEY through so ecosystem.config.cjs picks them up.
   export BACKEND_PORT FRONTEND_PORT BACKEND_URL="http://localhost:${BACKEND_PORT}" INGEST_KEY
-  local only="backend,frontend"
-  [ "$WITH_SCRAPERS" = 1 ] && only="$only,$SCRAPER_APPS"
-  say "Starting stack under PM2 ($only)"
-  # Tear down any prior supervision of these apps FIRST, so PM2 can't respawn
-  # into the ports while we free them (that race is what made it crash-loop).
-  pm2 delete ${only//,/ } >/dev/null 2>&1 || true
+  say "Starting stack under PM2 (web: backend,frontend$([ "$WITH_SCRAPERS" = 1 ] && echo "  scrapers: $SCRAPER_APPS"))"
+
+  # --- Web tier (binds the HTTP ports) ---
+  # Only the port-binding apps need the delete → free-port → start dance: deleting
+  # first stops PM2 respawning into the port while we free it (that race crash-looped).
+  pm2 delete backend frontend >/dev/null 2>&1 || true
   kill_legacy_nohup
   free_port "$BACKEND_PORT"
   free_port "$FRONTEND_PORT"
   # Guard the start: under `set -e` a non-zero exit here would abort the whole
   # script before we could show the cause. Capture it, show pm2's view, retry once.
-  if ! pm2 start "$ECOSYSTEM" --only "$only" --update-env; then
+  if ! pm2 start "$ECOSYSTEM" --only "backend,frontend" --update-env; then
     warn "pm2 start failed (output above) — freeing ports and retrying once"
     free_port "$BACKEND_PORT"; free_port "$FRONTEND_PORT"
-    pm2 start "$ECOSYSTEM" --only "$only" --update-env \
+    pm2 start "$ECOSYSTEM" --only "backend,frontend" --update-env \
       || die "pm2 could not start the stack. Inspect with: pm2 logs --lines 50"
   fi
+
+  # --- Scrapers (no ports) ---
+  # startOrRestart: starts any that are missing, restarts the rest IN PLACE. It
+  # never DELETES, so a deploy can't tear down an already-running scraper (e.g.
+  # the d247 proxy session you got working). Only touched with --with-scrapers.
+  if [ "$WITH_SCRAPERS" = 1 ]; then
+    pm2 startOrRestart "$ECOSYSTEM" --only "$SCRAPER_APPS" --update-env \
+      || warn "one or more scrapers failed to (re)start — inspect with: pm2 logs <name>"
+  fi
+
   pm2 save >/dev/null 2>&1 || true
   pm2 status || true
-  ok "pm2 apps online: $only"
+  ok "pm2 apps online"
   wait_health || warn "backend health check timed out — inspect with: pm2 logs backend"
   [ "$WITH_SCRAPERS" != 1 ] && warn "scrapers not started — re-run with --with-scrapers (melbet runs via the backend)"
   if ! pm2 startup 2>/dev/null | grep -q "already"; then

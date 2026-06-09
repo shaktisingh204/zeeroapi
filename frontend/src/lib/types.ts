@@ -42,6 +42,7 @@ export interface Plan {
   name: string;
   price_cents: number;
   rate_limit_per_min: number;
+  rate_limit_per_sec?: number | null;
   monthly_quota: number;
   features: string[];
   sort_order: number;
