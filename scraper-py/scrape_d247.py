@@ -716,12 +716,41 @@ class NodriverPage:
         self.mouse = _NDMouse(self)
         self.keyboard = _NDKeyboard(self)
 
-    async def _eval(self, js):
-        """Run a raw JS expression and return the value (handles nodriver API drift)."""
+    async def _raw_eval(self, expr):
+        """Call nodriver's evaluate; tolerate signature drift across versions."""
         try:
-            return await self._tab.evaluate(js, await_promise=False, return_by_value=True)
+            return await self._tab.evaluate(expr, await_promise=False, return_by_value=True)
         except TypeError:
-            return await self._tab.evaluate(js)
+            return await self._tab.evaluate(expr)
+
+    @staticmethod
+    def _unwrap(raw):
+        """Reduce nodriver's return (value, RemoteObject, or (RemoteObject, errors)
+        tuple) down to the underlying primitive."""
+        if isinstance(raw, tuple):
+            raw = raw[0] if raw else None
+        return getattr(raw, "value", raw)  # RemoteObject → .value; primitives pass through
+
+    async def _eval(self, js):
+        """Run a JS expression and return a real Python value.
+
+        nodriver only reliably returns *primitives* by value — arrays/objects can
+        come back as an un-iterable RemoteObject. So we JSON-stringify in-page
+        (always a string primitive) and parse it here. Returns None for
+        undefined/void expressions or in-page errors."""
+        wrapped = ("JSON.stringify((()=>{try{return (" + js + ");}"
+                   "catch(e){return null;}})())")
+        raw = self._unwrap(await self._raw_eval(wrapped))
+        if raw is None:
+            return None
+        if not isinstance(raw, str):
+            return raw  # a version that already deserialized — use as-is
+        if raw in ("undefined", ""):
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
 
     async def evaluate(self, fn, arg=None):
         """Playwright-style: `fn` is a JS function source; call it with `arg`."""
