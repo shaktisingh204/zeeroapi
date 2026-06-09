@@ -133,11 +133,31 @@
   50%      { transform: translate(40px, -30px) scale(1.12); }
 }
 
+@keyframes lp-gradient {
+  0%   { background-position: 0% 50%; }
+  50%  { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+@keyframes lp-marquee-rev {
+  from { transform: translateX(-50%); }
+  to   { transform: translateX(0); }
+}
+@keyframes lp-spin-slow {
+  to { transform: rotate(360deg); }
+}
+
 .lp-hero-in { animation: lp-fade-up 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
 .lp-float { animation: lp-float 6s ease-in-out infinite; }
-.lp-marquee-track { animation: lp-marquee 28s linear infinite; }
+.lp-marquee-track { animation: lp-marquee 32s linear infinite; }
 .lp-flash { animation: lp-flash 0.9s ease-out; }
 .lp-blob { animation: lp-blob 16s ease-in-out infinite; }
+.lp-gradient { background-size: 220% 220%; animation: lp-gradient 14s ease infinite; }
+.lp-spin-slow { animation: lp-spin-slow 24s linear infinite; }
+
+/* Smooth accordion height (grid 0fr -> 1fr trick) */
+.lp-acc { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.32s cubic-bezier(0.16, 1, 0.3, 1); }
+.lp-acc.open { grid-template-rows: 1fr; }
+.lp-acc > div { overflow: hidden; }
 
 /* scroll reveal (IntersectionObserver toggles .in) */
 .lp-reveal {
@@ -149,8 +169,10 @@
 .lp-reveal.in { opacity: 1; transform: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  .lp-hero-in, .lp-float, .lp-marquee-track, .lp-flash, .lp-blob { animation: none; }
+  .lp-hero-in, .lp-float, .lp-marquee-track, .lp-flash, .lp-blob,
+  .lp-gradient, .lp-spin-slow { animation: none; }
   .lp-reveal { opacity: 1; transform: none; transition: none; }
+  .lp-acc { transition: none; }
 }
 
 .live-dot {
