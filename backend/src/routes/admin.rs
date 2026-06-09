@@ -28,7 +28,8 @@ pub fn router() -> Router<AppState> {
         // SaaS: providers, plans, customers, API keys
         .route("/providers", get(list_providers))
         .route("/providers/:slug/toggle", patch(toggle_provider))
-        .route("/plans", get(list_plans))
+        .route("/plans", get(list_plans).post(create_plan))
+        .route("/plans/:slug", put(update_plan).delete(delete_plan))
         .route("/customers", get(list_customers).post(create_customer))
         .route("/customers/:id", delete(delete_customer))
         .route("/customers/:id/keys", get(list_keys).post(issue_key))
@@ -329,6 +330,132 @@ async fn list_plans(State(state): State<AppState>, _u: AuthUser) -> AppResult<Js
         .fetch_all(&state.pool)
         .await?;
     Ok(Json(rows))
+}
+
+/// Editable fields of a plan. `monthly_quota = -1` means unlimited; `features` is
+/// a flat list of marketing bullet strings.
+#[derive(Debug, Deserialize)]
+pub struct PlanFields {
+    pub name: String,
+    #[serde(default)]
+    pub price_cents: i32,
+    #[serde(default)]
+    pub rate_limit_per_min: i32,
+    #[serde(default)]
+    pub monthly_quota: i32,
+    #[serde(default)]
+    pub features: Vec<String>,
+    #[serde(default)]
+    pub sort_order: i32,
+    pub stripe_price_id: Option<String>,
+    pub metered_price_id: Option<String>,
+}
+
+/// Create form = a slug (immutable identity) plus all the editable fields.
+#[derive(Debug, Deserialize)]
+pub struct CreatePlanRequest {
+    pub slug: String,
+    #[serde(flatten)]
+    pub fields: PlanFields,
+}
+
+async fn create_plan(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(req): Json<CreatePlanRequest>,
+) -> AppResult<Json<Plan>> {
+    user.require_admin()?;
+    let slug = req.slug.trim().to_lowercase();
+    if slug.is_empty() {
+        return Err(AppError::BadRequest("slug is required".into()));
+    }
+    let f = req.fields;
+    if f.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
+    let p: Plan = sqlx::query_as(
+        "INSERT INTO plans \
+            (slug, name, price_cents, rate_limit_per_min, monthly_quota, features, sort_order, stripe_price_id, metered_price_id) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
+    )
+    .bind(&slug)
+    .bind(f.name.trim())
+    .bind(f.price_cents)
+    .bind(f.rate_limit_per_min)
+    .bind(f.monthly_quota)
+    .bind(json!(f.features))
+    .bind(f.sort_order)
+    .bind(&f.stripe_price_id)
+    .bind(&f.metered_price_id)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| match e {
+        // slug PK collision → a friendly 400 instead of a 500.
+        sqlx::Error::Database(db) if db.is_unique_violation() => {
+            AppError::BadRequest(format!("a plan with slug '{slug}' already exists"))
+        }
+        other => other.into(),
+    })?;
+    Ok(Json(p))
+}
+
+/// Update every editable field of a plan. The slug (its identity, referenced by
+/// customers) is intentionally immutable — change it by creating a new plan.
+async fn update_plan(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(slug): Path<String>,
+    Json(f): Json<PlanFields>,
+) -> AppResult<Json<Plan>> {
+    user.require_admin()?;
+    if f.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name is required".into()));
+    }
+    let updated: Option<Plan> = sqlx::query_as(
+        "UPDATE plans SET \
+            name = $2, price_cents = $3, rate_limit_per_min = $4, monthly_quota = $5, \
+            features = $6, sort_order = $7, stripe_price_id = $8, metered_price_id = $9 \
+         WHERE slug = $1 RETURNING *",
+    )
+    .bind(&slug)
+    .bind(f.name.trim())
+    .bind(f.price_cents)
+    .bind(f.rate_limit_per_min)
+    .bind(f.monthly_quota)
+    .bind(json!(f.features))
+    .bind(f.sort_order)
+    .bind(&f.stripe_price_id)
+    .bind(&f.metered_price_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    updated.map(Json).ok_or(AppError::NotFound)
+}
+
+async fn delete_plan(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(slug): Path<String>,
+) -> AppResult<Json<Value>> {
+    user.require_admin()?;
+    // Refuse to delete a plan that customers are still subscribed to — the
+    // customers.plan_slug FK would block it anyway; this gives a clear message.
+    let in_use: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM customers WHERE plan_slug = $1")
+        .bind(&slug)
+        .fetch_one(&state.pool)
+        .await?;
+    if in_use > 0 {
+        return Err(AppError::BadRequest(format!(
+            "{in_use} customer(s) are on '{slug}' — move them to another plan first"
+        )));
+    }
+    let res = sqlx::query("DELETE FROM plans WHERE slug = $1")
+        .bind(&slug)
+        .execute(&state.pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(json!({ "deleted": slug })))
 }
 
 // ---------------- Customers ----------------

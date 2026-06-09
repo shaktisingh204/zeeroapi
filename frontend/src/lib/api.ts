@@ -163,6 +163,15 @@ export const api = {
   toggleProvider: (slug: string) =>
     request<Provider>(`/admin/providers/${slug}/toggle`, { method: "PATCH" }),
   plans: () => request<Plan[]>("/admin/plans"),
+  createPlan: (body: Plan) =>
+    request<Plan>("/admin/plans", { method: "POST", body: JSON.stringify(body) }),
+  updatePlan: (slug: string, body: Omit<Plan, "slug">) =>
+    request<Plan>(`/admin/plans/${slug}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  deletePlan: (slug: string) =>
+    request<{ deleted: string }>(`/admin/plans/${slug}`, { method: "DELETE" }),
   customers: () => request<Customer[]>("/admin/customers"),
   createCustomer: (email: string, name: string, plan_slug: string) =>
     request<Customer>("/admin/customers", {
