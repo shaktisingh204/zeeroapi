@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Dumbbell } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Sport } from "@/lib/types";
+import { useAdminProvider } from "@/lib/adminProvider";
 import {
   PageHeader,
   EmptyState,
@@ -12,6 +13,8 @@ import {
 } from "@/components/ui";
 
 export default function SportsPage() {
+  const { provider, providers } = useAdminProvider();
+  const providerName = providers.find((p) => p.slug === provider)?.name ?? provider;
   const [sports, setSports] = useState<Sport[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -68,7 +71,7 @@ export default function SportsPage() {
     <div>
       <PageHeader
         title="Sports"
-        subtitle="Catalog scraped from the provider. Toggle to include/exclude from feeds."
+        subtitle={`Catalog scraped from the provider. Toggle to include/exclude from feeds. · Viewing ${providerName}`}
       />
       <div className="card overflow-hidden">
         <DataTable

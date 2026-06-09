@@ -13,3 +13,6 @@
 
 # OS
 .DS_Store
+
+# Scraper session state (live cookies — never commit)
+**/.d247_state.json

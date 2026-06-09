@@ -119,20 +119,22 @@ export default function SdksPage() {
         <CodeBlock code={SNIPPETS[lang]} />
       </div>
 
-      <div className="card p-5 mt-6">
-        <h2 className="font-semibold text-white mb-2">Authentication</h2>
-        <p className="text-sm text-muted">
-          Every request authenticates with your API key via the{" "}
-          <code className="text-brand">X-API-Key</code> header (or{" "}
-          <code className="text-brand">?api_key=</code> query param). Set{" "}
-          <code className="text-brand">ZEROAPI_KEY</code> in your environment and never commit it.
-          Keys can be scoped to specific providers, source IPs and an expiry from the Overview tab.
-        </p>
-      </div>
+      <div className="grid gap-4 lg:grid-cols-2 mt-6">
+        <div className="card p-5">
+          <h2 className="font-semibold text-white mb-2">Authentication</h2>
+          <p className="text-sm text-muted">
+            Every request authenticates with your API key via the{" "}
+            <code className="text-brand">X-API-Key</code> header (or{" "}
+            <code className="text-brand">?api_key=</code> query param). Set{" "}
+            <code className="text-brand">ZEROAPI_KEY</code> in your environment and never commit it.
+            Keys can be scoped to specific providers, source IPs and an expiry from the Overview tab.
+          </p>
+        </div>
 
-      <div className="card p-5 mt-4">
-        <h2 className="font-semibold text-white mb-2">Base URL</h2>
-        <CodeBlock code={API_BASE} />
+        <div className="card p-5">
+          <h2 className="font-semibold text-white mb-2">Base URL</h2>
+          <CodeBlock code={API_BASE} />
+        </div>
       </div>
     </div>
   );

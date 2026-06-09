@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ImageOff } from "lucide-react";
 import { api } from "@/lib/api";
 import type { Image } from "@/lib/types";
+import { useAdminProvider } from "@/lib/adminProvider";
 import { PageHeader, EmptyState } from "@/components/ui";
 
 type Kind = "all" | "sport" | "league" | "team";
@@ -17,6 +18,8 @@ const KIND_BADGE: Record<Image["kind"], string> = {
 };
 
 export default function ImagesPage() {
+  const { provider, providers } = useAdminProvider();
+  const providerName = providers.find((p) => p.slug === provider)?.name ?? provider;
   const [images, setImages] = useState<Image[]>([]);
   const [loading, setLoading] = useState(true);
   const [kind, setKind] = useState<Kind>("all");
@@ -41,7 +44,7 @@ export default function ImagesPage() {
     <div>
       <PageHeader
         title="Images"
-        subtitle="Scraped team / league / sport logos"
+        subtitle={`Scraped team / league / sport logos · Viewing ${providerName}`}
       />
 
       <div className="flex flex-wrap items-center gap-3 mb-6">

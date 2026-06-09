@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Search, Swords } from "lucide-react";
 import { api } from "@/lib/api";
 import type { MatchView, Sport } from "@/lib/types";
+import { useAdminProvider } from "@/lib/adminProvider";
 import {
   PageHeader,
   EmptyState,
@@ -15,6 +16,8 @@ import {
 } from "@/components/ui";
 
 export default function MatchesPage() {
+  const { provider, providers } = useAdminProvider();
+  const providerName = providers.find((p) => p.slug === provider)?.name ?? provider;
   const [matches, setMatches] = useState<MatchView[]>([]);
   const [sports, setSports] = useState<Sport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -93,7 +96,10 @@ export default function MatchesPage() {
 
   return (
     <div>
-      <PageHeader title="Matches" subtitle="All scraped events, prematch and live" />
+      <PageHeader
+        title="Matches"
+        subtitle={`All scraped events, prematch and live · Viewing ${providerName}`}
+      />
 
       <div className="card p-4 mb-4 flex flex-wrap gap-3">
         <div className="relative flex-1 min-w-[220px]">

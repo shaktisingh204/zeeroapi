@@ -186,14 +186,16 @@ async fn snapshot(
             if let Some(u) = url {
                 if !u.is_empty() {
                     sqlx::query(
-                        "INSERT INTO images (url, kind, name) VALUES ($1,$2,$3)
+                        "INSERT INTO images (url, kind, name, provider) VALUES ($1,$2,$3,$4)
                          ON CONFLICT (url) DO UPDATE
                          SET seen_count = images.seen_count + 1, last_seen = now(),
-                             name = COALESCE(EXCLUDED.name, images.name)",
+                             name = COALESCE(EXCLUDED.name, images.name),
+                             provider = COALESCE(EXCLUDED.provider, images.provider)",
                     )
                     .bind(u)
                     .bind(kind)
                     .bind(name)
+                    .bind(provider)
                     .execute(&mut *tx)
                     .await?;
                 }

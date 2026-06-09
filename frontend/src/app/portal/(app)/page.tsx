@@ -158,10 +158,10 @@ export default function PortalDashboard() {
         <div className="rounded-lg bg-live/15 text-live text-sm px-3 py-2 mb-4">{error}</div>
       )}
 
-      <div className="grid gap-4 sm:grid-cols-3 mb-6">
-        <StatCard label="Current plan" value={plan.name} />
-        <StatCard label="Rate limit" value={`${plan.rate_limit_per_min}/min`} />
-        <StatCard label="This month" value={`${usedLabel} / ${quotaLabel}`} />
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-3 mb-6">
+        <StatCard label="Current plan" value={plan.name} accent="#34d27b" />
+        <StatCard label="Rate limit" value={`${plan.rate_limit_per_min}/min`} accent="#3b82f6" />
+        <StatCard label="This month" value={`${usedLabel} / ${quotaLabel}`} accent="#f59e0b" />
       </div>
 
       {/* First-run guide */}

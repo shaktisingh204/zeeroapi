@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { CreditCard, ExternalLink } from "lucide-react";
 import { portal } from "@/lib/portal";
-import type { BillingSummary } from "@/lib/portal";
+import type { BillingSummary, Invoice } from "@/lib/portal";
 import type { Plan } from "@/lib/types";
 import { PageHeader, StatCard, Spinner } from "@/components/ui";
 
@@ -14,6 +14,7 @@ function money(cents: number): string {
 export default function BillingPage() {
   const [summary, setSummary] = useState<BillingSummary | null>(null);
   const [plans, setPlans] = useState<Plan[]>([]);
+  const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [unavailable, setUnavailable] = useState(false);
   const [error, setError] = useState("");
@@ -27,6 +28,11 @@ export default function BillingPage() {
       })
       .catch(() => setUnavailable(true))
       .finally(() => setLoading(false));
+    // Invoices are best-effort (empty until a Stripe customer exists).
+    portal
+      .invoices()
+      .then((r) => setInvoices(r.invoices ?? []))
+      .catch(() => setInvoices([]));
   }, []);
 
   async function upgrade(slug: string) {
@@ -143,6 +149,58 @@ export default function BillingPage() {
           );
         })}
       </div>
+
+      {invoices.length > 0 && (
+        <>
+          <h2 className="font-semibold text-white mt-8 mb-3">Invoices</h2>
+          <div className="card overflow-hidden">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-border">
+                  <th className="th">Invoice</th>
+                  <th className="th">Date</th>
+                  <th className="th text-right">Amount</th>
+                  <th className="th">Status</th>
+                  <th className="th text-right">Receipt</th>
+                </tr>
+              </thead>
+              <tbody>
+                {invoices.map((inv) => (
+                  <tr key={inv.id} className="border-b border-border-soft last:border-0">
+                    <td className="td font-mono text-xs">{inv.number ?? inv.id}</td>
+                    <td className="td">{new Date(inv.created * 1000).toLocaleDateString()}</td>
+                    <td className="td text-right tabular">
+                      {(inv.amount_paid / 100).toLocaleString(undefined, {
+                        style: "currency",
+                        currency: (inv.currency || "usd").toUpperCase(),
+                      })}
+                    </td>
+                    <td className="td">
+                      <span className={inv.status === "paid" ? "badge-brand" : "badge-muted"}>
+                        {inv.status ?? "—"}
+                      </span>
+                    </td>
+                    <td className="td text-right">
+                      {inv.hosted_invoice_url ? (
+                        <a
+                          href={inv.hosted_invoice_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-brand hover:underline inline-flex items-center gap-1"
+                        >
+                          View <ExternalLink size={12} />
+                        </a>
+                      ) : (
+                        <span className="text-muted-2">—</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }

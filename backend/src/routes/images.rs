@@ -17,6 +17,7 @@ pub fn router() -> Router<AppState> {
 pub struct ImageQuery {
     pub kind: Option<String>,
     pub search: Option<String>,
+    pub provider: Option<String>,
     pub limit: Option<i64>,
 }
 
@@ -29,17 +30,20 @@ async fn list(
         .search
         .filter(|s| !s.is_empty())
         .map(|s| format!("%{}%", s.to_lowercase()));
+    let provider = q.provider.filter(|s| !s.is_empty());
 
     let images: Vec<Image> = sqlx::query_as(
         "SELECT * FROM images
          WHERE ($1::text IS NULL OR kind = $1)
            AND ($2::text IS NULL OR lower(coalesce(name,'')) LIKE $2)
+           AND ($4::text IS NULL OR provider = $4)
          ORDER BY last_seen DESC
          LIMIT $3",
     )
     .bind(q.kind)
     .bind(search)
     .bind(limit)
+    .bind(provider)
     .fetch_all(&state.pool)
     .await?;
 

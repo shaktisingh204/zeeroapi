@@ -121,8 +121,14 @@ export const api = {
     return request<LeagueView[]>(`/leagues${q ? `?${q}` : ""}`);
   },
 
-  images: (kind?: string) =>
-    request<Image[]>(`/images${kind ? `?kind=${kind}` : ""}`),
+  images: (kind?: string) => {
+    const qs = new URLSearchParams();
+    const p = getAdminProvider();
+    if (kind) qs.set("kind", kind);
+    if (p) qs.set("provider", p);
+    const q = qs.toString();
+    return request<Image[]>(`/images${q ? `?${q}` : ""}`);
+  },
 
   matches: (params: Record<string, string | number | undefined> = {}) => {
     const p = getAdminProvider();
@@ -134,8 +140,8 @@ export const api = {
     const q = qs.toString();
     return request<MatchView[]>(`/matches${q ? `?${q}` : ""}`);
   },
-  match: (id: number) => request<MatchDetail>(`/matches/${id}`),
-  matchOdds: (id: number) => request<Odd[]>(`/matches/${id}/odds`),
+  match: (id: number) => request<MatchDetail>(`/matches/${id}${provQS()}`),
+  matchOdds: (id: number) => request<Odd[]>(`/matches/${id}/odds${provQS()}`),
 
   live: () => request<MatchView[]>(`/live${provQS()}`),
 
@@ -177,9 +183,11 @@ export const api = {
     request<CustomerUsage>(`/admin/customers/${id}/usage`),
 
   // --- Analytics ---
-  health: () => request<AdminHealth>("/admin/health"),
+  // health + freshness are scoped to the active provider; coverage stays
+  // cross-provider (it's the per-provider comparison view).
+  health: () => request<AdminHealth>(`/admin/health${provQS()}`),
   coverage: () => request<{ coverage: ProviderCoverage[] }>("/admin/coverage"),
-  freshness: () => request<Freshness>("/admin/freshness"),
+  freshness: () => request<Freshness>(`/admin/freshness${provQS()}`),
   business: () => request<Business>("/admin/business"),
   oddsHistory: (matchId: number, market?: string, outcome?: string) => {
     const qs = new URLSearchParams();

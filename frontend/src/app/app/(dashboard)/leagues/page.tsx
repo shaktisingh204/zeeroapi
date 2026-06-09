@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Search, Trophy } from "lucide-react";
 import { api } from "@/lib/api";
 import type { LeagueView, Sport } from "@/lib/types";
+import { useAdminProvider } from "@/lib/adminProvider";
 import {
   PageHeader,
   EmptyState,
@@ -12,6 +13,8 @@ import {
 } from "@/components/ui";
 
 export default function LeaguesPage() {
+  const { provider, providers } = useAdminProvider();
+  const providerName = providers.find((p) => p.slug === provider)?.name ?? provider;
   const [leagues, setLeagues] = useState<LeagueView[]>([]);
   const [sports, setSports] = useState<Sport[]>([]);
   const [loading, setLoading] = useState(true);
@@ -96,7 +99,10 @@ export default function LeaguesPage() {
 
   return (
     <div>
-      <PageHeader title="Leagues" subtitle="All scraped leagues / tournaments" />
+      <PageHeader
+        title="Leagues"
+        subtitle={`All scraped leagues / tournaments · Viewing ${providerName}`}
+      />
 
       <div className="card p-4 mb-4 flex flex-wrap gap-3">
         <div className="relative flex-1 min-w-[220px]">

@@ -441,15 +441,25 @@ async fn revoke_key(
 
 // ---------------- Analytics: scraper health ----------------
 
-async fn health(State(state): State<AppState>, _u: AuthUser) -> AppResult<Json<Value>> {
+async fn health(
+    State(state): State<AppState>,
+    _u: AuthUser,
+    Query(q): Query<StatsQuery>,
+) -> AppResult<Json<Value>> {
     let pool = &state.pool;
+    // scrape_logs has no provider column; the `job` is provider-prefixed for the
+    // standalone scrapers (d247-*, 1win-*, bcgame-*, …), so scope best-effort by a
+    // job-name prefix. None = all jobs.
+    let p = q.provider;
 
     let (total, ok, err): (i64, i64, i64) = sqlx::query_as(
         "SELECT COUNT(*)::bigint,
                 COUNT(*) FILTER (WHERE status = 'success')::bigint,
                 COUNT(*) FILTER (WHERE status = 'error')::bigint
-         FROM scrape_logs WHERE started_at > now() - interval '24 hours'",
+         FROM scrape_logs WHERE started_at > now() - interval '24 hours'
+           AND ($1::text IS NULL OR job ILIKE $1 || '%')",
     )
+    .bind(&p)
     .fetch_one(pool)
     .await?;
 
@@ -461,20 +471,27 @@ async fn health(State(state): State<AppState>, _u: AuthUser) -> AppResult<Json<V
                 COUNT(*) FILTER (WHERE status = 'error')::bigint,
                 COALESCE(AVG(duration_ms), 0)::bigint
          FROM scrape_logs WHERE started_at > now() - interval '24 hours'
+           AND ($1::text IS NULL OR job ILIKE $1 || '%')
          GROUP BY 1 ORDER BY 1",
     )
+    .bind(&p)
     .fetch_all(pool)
     .await?;
 
-    let recent: Vec<ScrapeLog> =
-        sqlx::query_as("SELECT * FROM scrape_logs ORDER BY started_at DESC LIMIT 20")
-            .fetch_all(pool)
-            .await?;
+    let recent: Vec<ScrapeLog> = sqlx::query_as(
+        "SELECT * FROM scrape_logs WHERE ($1::text IS NULL OR job ILIKE $1 || '%')
+         ORDER BY started_at DESC LIMIT 20",
+    )
+    .bind(&p)
+    .fetch_all(pool)
+    .await?;
 
-    let last_run: Option<chrono::DateTime<chrono::Utc>> =
-        sqlx::query_scalar("SELECT MAX(started_at) FROM scrape_logs")
-            .fetch_one(pool)
-            .await?;
+    let last_run: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT MAX(started_at) FROM scrape_logs WHERE ($1::text IS NULL OR job ILIKE $1 || '%')",
+    )
+    .bind(&p)
+    .fetch_one(pool)
+    .await?;
 
     let page_sync: Option<String> =
         sqlx::query_scalar("SELECT value FROM settings WHERE key = 'page_sync_enabled'")
@@ -539,34 +556,47 @@ async fn coverage(State(state): State<AppState>, _u: AuthUser) -> AppResult<Json
 
 // ---------------- Analytics: data freshness ----------------
 
-async fn freshness(State(state): State<AppState>, _u: AuthUser) -> AppResult<Json<Value>> {
+async fn freshness(
+    State(state): State<AppState>,
+    _u: AuthUser,
+    Query(q): Query<StatsQuery>,
+) -> AppResult<Json<Value>> {
     let pool = &state.pool;
+    let p = q.provider; // None = all providers
 
     // Age in seconds of the oldest / average live row (cast to float8 so sqlx
     // decodes it as f64 — EXTRACT returns numeric on PG14+).
     let (live_max, live_avg): (Option<f64>, Option<f64>) = sqlx::query_as(
         "SELECT MAX(EXTRACT(EPOCH FROM now() - updated_at))::float8,
                 AVG(EXTRACT(EPOCH FROM now() - updated_at))::float8
-         FROM matches WHERE status = 'live'",
+         FROM matches WHERE status = 'live' AND ($1::text IS NULL OR provider = $1)",
     )
+    .bind(&p)
     .fetch_one(pool)
     .await?;
 
     let odds_age: Option<f64> = sqlx::query_scalar(
-        "SELECT EXTRACT(EPOCH FROM now() - MAX(updated_at))::float8 FROM odds",
+        "SELECT EXTRACT(EPOCH FROM now() - MAX(updated_at))::float8 FROM odds
+         WHERE ($1::text IS NULL OR provider = $1)",
     )
+    .bind(&p)
     .fetch_one(pool)
     .await?;
 
     let matches_age: Option<f64> = sqlx::query_scalar(
-        "SELECT EXTRACT(EPOCH FROM now() - MAX(updated_at))::float8 FROM matches",
+        "SELECT EXTRACT(EPOCH FROM now() - MAX(updated_at))::float8 FROM matches
+         WHERE ($1::text IS NULL OR provider = $1)",
     )
+    .bind(&p)
     .fetch_one(pool)
     .await?;
 
     let last_ingest: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-        "SELECT MAX(started_at) FROM scrape_logs WHERE job IN ('pages', 'page-sync')",
+        "SELECT MAX(started_at) FROM scrape_logs
+         WHERE ($1::text IS NULL AND job IN ('pages', 'page-sync'))
+            OR ($1::text IS NOT NULL AND job ILIKE $1 || '%')",
     )
+    .bind(&p)
     .fetch_one(pool)
     .await?;
 

@@ -13,6 +13,7 @@ import { Radio, ListOrdered, Trophy, Coins, Clock } from "lucide-react";
 import { api } from "@/lib/api";
 import type { DashboardStats } from "@/lib/types";
 import { TOOLTIP_STYLE } from "@/lib/theme";
+import { useAdminProvider } from "@/lib/adminProvider";
 import { PageHeader, StatCard, StatusBadge, Spinner } from "@/components/ui";
 import AdminInsights from "@/components/AdminInsights";
 
@@ -23,6 +24,8 @@ const TABS = [
 type Tab = (typeof TABS)[number]["id"];
 
 export default function OverviewPage() {
+  const { provider, providers } = useAdminProvider();
+  const providerName = providers.find((p) => p.slug === provider)?.name ?? provider;
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>("summary");
@@ -38,7 +41,7 @@ export default function OverviewPage() {
     <div>
       <PageHeader
         title="Overview"
-        subtitle="Live snapshot of scraped data, pipeline health and business metrics"
+        subtitle={`Live snapshot of scraped data, pipeline health and business metrics · Viewing ${providerName}`}
         actions={
           <div className="flex gap-1 rounded-lg bg-surface-2 p-1">
             {TABS.map((t) => (
@@ -57,7 +60,13 @@ export default function OverviewPage() {
       />
 
       {tab === "insights" ? (
-        <AdminInsights />
+        <>
+          <div className="flex flex-wrap items-center gap-2 mb-4 text-xs">
+            <span className="badge-muted">Health &amp; freshness scoped to {providerName}</span>
+            <span className="badge-muted">Coverage spans all providers</span>
+          </div>
+          <AdminInsights />
+        </>
       ) : loading && !stats ? (
         <Spinner />
       ) : !stats ? null : (

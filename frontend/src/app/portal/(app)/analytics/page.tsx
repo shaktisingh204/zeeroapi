@@ -27,7 +27,7 @@ const TOOLTIP = {
 } as const;
 
 const STATUS_META: Record<number, { label: string; color: string }> = {
-  2: { label: "2xx success", color: "#22c55e" },
+  2: { label: "2xx success", color: "#34d27b" },
   4: { label: "4xx client", color: "#f59e0b" },
   5: { label: "5xx server", color: "#ef4444" },
 };
@@ -155,7 +155,7 @@ export default function AnalyticsPage() {
         <>
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
             <StatCard label="Requests" value={totalReq.toLocaleString()} accent="#3b82f6" />
-            <StatCard label="Error rate" value={`${errRate}%`} accent={Number(errRate) > 5 ? "#ef4444" : "#22c55e"} />
+            <StatCard label="Error rate" value={`${errRate}%`} accent={Number(errRate) > 5 ? "#ef4444" : "#34d27b"} />
             <StatCard label="Avg latency" value={`${avgLatency} ms`} accent="#f59e0b" />
             <StatCard label="Top endpoint" value={topEndpoint ? `${topEndpoint.endpoint || "·"}` : "—"} accent="#a855f7" />
           </div>

@@ -4,9 +4,12 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import type { MatchView } from "@/lib/types";
+import { useAdminProvider } from "@/lib/adminProvider";
 import { PageHeader, Spinner, EmptyState } from "@/components/ui";
 
 export default function LivePage() {
+  const { provider, providers } = useAdminProvider();
+  const providerName = providers.find((p) => p.slug === provider)?.name ?? provider;
   const [matches, setMatches] = useState<MatchView[]>([]);
   const [loading, setLoading] = useState(true);
   const [updated, setUpdated] = useState<Date | null>(null);
@@ -33,8 +36,8 @@ export default function LivePage() {
         title="Live Scores"
         subtitle={
           updated
-            ? `Auto-refreshing every 10s · last update ${updated.toLocaleTimeString()}`
-            : "Live matches across all sports"
+            ? `Auto-refreshing every 10s · last update ${updated.toLocaleTimeString()} · Viewing ${providerName}`
+            : `Live matches across all sports · Viewing ${providerName}`
         }
       />
 

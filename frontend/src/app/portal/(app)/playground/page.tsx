@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { API_BASE } from "@/lib/portal";
 import { getProviders, type ProviderOption } from "@/lib/providers";
-import { PageHeader, Spinner } from "@/components/ui";
+import { PageHeader, Spinner, EmptyState } from "@/components/ui";
 
 const KEY_STORAGE = "zeroapi_pg_key";
 
@@ -90,7 +90,8 @@ export default function PlaygroundPage() {
     <div>
       <PageHeader title="Playground" subtitle="Try the API with your key" />
 
-      <div className="card p-5 mb-6">
+      <div className="grid gap-6 lg:grid-cols-2 lg:items-start">
+      <div className="card p-5">
         <div className="grid gap-4">
           <div>
             <label className="block text-sm text-white mb-1.5">API key</label>
@@ -190,10 +191,9 @@ export default function PlaygroundPage() {
             </pre>
           </div>
         ) : (
-          <div className="py-16 text-center text-muted text-sm">
-            Send a request to see the response
-          </div>
+          <EmptyState message="Send a request to see the response." />
         )}
+      </div>
       </div>
     </div>
   );

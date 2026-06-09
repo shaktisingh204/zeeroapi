@@ -33,6 +33,29 @@ SITE = "https://d247.com"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 
+# Where we persist the logged-in browser state (cookies + localStorage incl.
+# the Cloudflare clearance + demo session). On restart we reload this to skip
+# the Cloudflare challenge and the demo-login click entirely.
+STATE_FILE = os.environ.get("D247_STATE_FILE",
+                            os.path.join(os.path.dirname(__file__), ".d247_state.json"))
+
+# We only read the rendered DOM text — images, fonts and media are pure weight.
+# Aborting them cuts page-load time and bandwidth a lot. We KEEP stylesheets:
+# the event list is scroll-virtualized, so layout must work for rows to render.
+BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
+
+
+async def block_assets(route):
+    """Abort heavy non-essential requests; let everything else through."""
+    try:
+        if route.request.resource_type in BLOCKED_RESOURCE_TYPES:
+            await route.abort()
+        else:
+            await route.continue_()
+    except Exception:
+        # A request can vanish mid-flight on navigation; ignore.
+        pass
+
 # d247 lists every sport as a tab in `ul.sports-tab li.nav-item` on the home
 # main content; clicking a tab filters the event list (in-SPA, session-safe).
 # We iterate ALL tabs so every sport the site offers is covered. Race/outright
@@ -246,11 +269,105 @@ async def dismiss_modal(page):
         pass
 
 
-async def demo_login(page):
+# Candidate selectors for the "play as demo" control. d247 has shuffled this
+# button's wording/markup before, so we try several rather than one literal
+# string. Order = most-specific first. Matching is case-insensitive.
+DEMO_LOGIN_SELECTORS = [
+    "text=/login with demo id/i",
+    "text=/demo\\s*login/i",
+    "text=/login\\s*demo/i",
+    "text=/one[-\\s]*click\\s*demo/i",
+    "button:has-text('Demo')",
+    "a:has-text('Demo')",
+    "[class*='demo' i]",
+]
+
+# Markers that mean we're already past the login wall (demo session is live).
+LOGGED_IN_SELECTORS = [TAB_STRIP, ".bet-table-row", ".sports-tab"]
+
+
+async def _diagnose_login(page, why):
+    """Dump what the page is actually showing so a failed login is debuggable
+    from the logs (no need to reproduce locally)."""
+    print(f"demo_login: {why} — dumping page state for diagnosis", file=sys.stderr)
+    try:
+        print(f"  url={page.url}  title={await page.title()!r}", file=sys.stderr)
+    except Exception:
+        pass
+    try:
+        shot = "/tmp/d247_login_fail.png"
+        await page.screenshot(path=shot, full_page=False)
+        print(f"  screenshot saved: {shot}", file=sys.stderr)
+    except Exception as e:
+        print(f"  screenshot failed: {e}", file=sys.stderr)
+    try:
+        texts = await page.evaluate(
+            "() => [...document.querySelectorAll('button,a,[role=button]')]"
+            ".map(e => (e.innerText||'').trim()).filter(Boolean).slice(0,40)"
+        )
+        print(f"  visible buttons/links: {texts}", file=sys.stderr)
+    except Exception as e:
+        print(f"  could not read controls: {e}", file=sys.stderr)
+
+
+async def _is_logged_in(page):
+    for sel in LOGGED_IN_SELECTORS:
+        try:
+            if await page.query_selector(sel):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def demo_login(page, deadline_s=75):
+    """Open d247, wait out Cloudflare, and start a demo session.
+
+    Resilient to: slow Cloudflare challenges (polls instead of a fixed sleep),
+    button-text changes (multiple candidate selectors), and an already-live
+    session. Raises a clear RuntimeError with diagnostics if none works."""
     await page.goto(f"{SITE}/", wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(9000)  # let Cloudflare's JS challenge clear
-    await page.click("text=Login with demo ID", timeout=15000)
-    await page.wait_for_timeout(10000)  # demo session + dashboard load
+
+    start = time.monotonic()
+    clicked = False
+    while time.monotonic() - start < deadline_s:
+        # Already inside? (Cloudflare may auto-restore a session, or a prior pass
+        # left us logged in.) Then there's nothing to click.
+        if await _is_logged_in(page):
+            print("demo session ready (already logged in):", page.url)
+            await dismiss_modal(page)
+            return
+
+        for sel in DEMO_LOGIN_SELECTORS:
+            try:
+                loc = page.locator(sel).first
+                if await loc.is_visible():
+                    await loc.click(timeout=5000)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        if clicked:
+            break
+
+        # Not ready yet — Cloudflare's JS challenge or the SPA bundle is still
+        # loading. Wait a beat and re-check rather than failing at a fixed 9s.
+        await page.wait_for_timeout(2000)
+
+    if not clicked and not await _is_logged_in(page):
+        await _diagnose_login(page, "no demo-login control appeared")
+        raise RuntimeError(
+            "d247 demo login failed: none of the demo-login selectors matched "
+            f"within {deadline_s}s (see /tmp/d247_login_fail.png and the button "
+            "list above — d247 likely changed the login markup)."
+        )
+
+    # Wait for the dashboard to actually render before we declare success.
+    try:
+        await page.wait_for_selector(",".join(LOGGED_IN_SELECTORS), timeout=20000)
+    except Exception:
+        await _diagnose_login(page, "clicked demo login but dashboard never rendered")
+        raise RuntimeError("d247 demo login: dashboard did not load after click")
     await dismiss_modal(page)
     print("demo session ready:", page.url)
 
@@ -475,10 +592,24 @@ async def main():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(channel="chrome", headless=not args.headed)
+        # Reuse a previous session if we have one — skips Cloudflare + login.
+        state_kw = {}
+        if os.path.exists(STATE_FILE):
+            state_kw["storage_state"] = STATE_FILE
+            print(f"reusing saved session: {STATE_FILE}")
         ctx = await browser.new_context(locale="en-US", user_agent=UA,
-                                        viewport={"width": 1440, "height": 1100})
+                                        viewport={"width": 1440, "height": 1100},
+                                        **state_kw)
+        # Drop images/fonts/media — we only scrape DOM text.
+        await ctx.route("**/*", block_assets)
         page = await ctx.new_page()
         await demo_login(page)
+        # Persist the now-logged-in state so the next restart starts warm.
+        try:
+            await ctx.storage_state(path=STATE_FILE)
+            print(f"saved session: {STATE_FILE}")
+        except Exception as e:
+            print(f"could not save session state: {e}", file=sys.stderr)
 
         async with httpx.AsyncClient() as client:
             n = 0
