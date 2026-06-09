@@ -17,6 +17,7 @@ Env: BACKEND_URL (default http://localhost:8081), INGEST_KEY (default dev-ingest
 """
 import argparse
 import asyncio
+import json
 import os
 import re
 import signal
@@ -576,10 +577,366 @@ async def one_pass(client, page):
     return total_m, total_o, len(labels)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Browser engines + nodriver backend
+# ═══════════════════════════════════════════════════════════════════════════
+# We try stealth browsers in order; the first that gets past Cloudflare and logs
+# in wins. patchright / rebrowser-playwright / camoufox all expose the standard
+# Playwright page API, so the scraping code above runs on them UNCHANGED. nodriver
+# has a totally different API, so we wrap its Tab in `NodriverPage`, an adapter
+# that emulates exactly the Playwright `page` methods the scraper calls — letting
+# the same demo_login/one_pass/etc. drive it. Override the order/set with
+# D247_ENGINES (e.g. "nodriver" to force nodriver only).
+ENGINE_ORDER = [e.strip().lower() for e in os.environ.get(
+    "D247_ENGINES", "patchright,rebrowser,camoufox,playwright,nodriver").split(",") if e.strip()]
+
+
+def _js_str(s):
+    """Embed a Python string as a safe single-quoted JS string literal."""
+    return "'" + str(s).replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
+
+
+def _candidates_js(selector):
+    """Compile a selector (CSS, `text=...`, `text=/re/flags`, or `tag:has-text(..)`)
+    into a JS expression yielding the array of matching elements, most-specific
+    first. Covers every selector dialect the scraper feeds to page.locator()."""
+    s = selector.strip()
+    TAGS = "'button,a,[role=button],input,div,span,li'"
+    m = re.match(r"^text=/(.*)/([a-z]*)$", s)
+    if m:
+        return (f"[...document.querySelectorAll({TAGS})]"
+                f".filter(e=>new RegExp({_js_str(m.group(1))},{_js_str(m.group(2))})"
+                f".test((e.innerText||'').trim()))"
+                f".sort((a,b)=>(a.innerText||'').length-(b.innerText||'').length)")
+    if s.startswith("text="):
+        needle = s[len("text="):].strip().lower()
+        return (f"[...document.querySelectorAll({TAGS})]"
+                f".filter(e=>(e.innerText||'').toLowerCase().includes({_js_str(needle)}))"
+                f".sort((a,b)=>(a.innerText||'').length-(b.innerText||'').length)")
+    m = re.match(r"^([a-zA-Z0-9*]+):has-text\(['\"](.*)['\"]\)$", s)
+    if m:
+        return (f"[...document.querySelectorAll({_js_str(m.group(1))})]"
+                f".filter(e=>(e.innerText||'').toLowerCase().includes({_js_str(m.group(2).lower())}))")
+    return f"[...document.querySelectorAll({_js_str(s)})]"
+
+
+class _NDElement:
+    """A handle to one DOM element, identified by the CSS that found it. Re-queries
+    on each op (the DOM is stable between query and use in our flows)."""
+    def __init__(self, page, css):
+        self._page, self._css = page, css
+
+    async def click(self, timeout=0):
+        ok = await self._page._eval(
+            f"(()=>{{const el=document.querySelector({_js_str(self._css)});"
+            f"if(!el)return false;el.scrollIntoView({{block:'center'}});el.click();return true;}})()")
+        if not ok:
+            raise RuntimeError(f"element not found to click: {self._css}")
+
+    async def evaluate(self, fn):
+        return await self._page._eval(
+            f"(()=>{{const el=document.querySelector({_js_str(self._css)});"
+            f"if(!el)return null;return ({fn})(el);}})()")
+
+
+class _NDLocator:
+    """Emulates the slice of Playwright's Locator the scraper uses: .first, .nth(i),
+    .locator(childCss), .click(), .is_visible() — all resolved via one JS query."""
+    def __init__(self, page, base, steps=None):
+        self._page, self._base, self._steps = page, base, list(steps or [])
+
+    def _with(self, step):
+        return _NDLocator(self._page, self._base, self._steps + [step])
+
+    @property
+    def first(self):
+        return self._with(("nth", 0))
+
+    def nth(self, i):
+        return self._with(("nth", i))
+
+    def locator(self, css):
+        return self._with(("child", css))
+
+    def _el_js(self):
+        """Build a JS IIFE-body that resolves `el` to the target element or null."""
+        body = [f"let arr={_candidates_js(self._base)};let el=arr[0]||null;"]
+        for kind, val in self._steps:
+            if kind == "nth":
+                body.append(f"el=arr[{int(val)}]||null;")
+            elif kind == "child":
+                body.append(f"el=el&&el.querySelector({_js_str(val)});")
+        return "".join(body)
+
+    async def click(self, timeout=0):
+        ok = await self._page._eval(
+            f"(()=>{{{self._el_js()}if(!el)return false;"
+            f"el.scrollIntoView({{block:'center'}});el.click();return true;}})()")
+        if not ok:
+            raise RuntimeError(f"locator click failed: {self._base} {self._steps}")
+
+    async def is_visible(self):
+        return bool(await self._page._eval(
+            f"(()=>{{{self._el_js()}if(!el)return false;"
+            f"const r=el.getBoundingClientRect(),s=getComputedStyle(el);"
+            f"return !!(r.width||r.height)&&s.visibility!=='hidden'"
+            f"&&s.display!=='none'&&s.opacity!=='0';}})()"))
+
+
+class _NDMouse:
+    def __init__(self, page):
+        self._page = page
+
+    async def wheel(self, dx, dy):
+        await self._page._eval(f"window.scrollBy({int(dx)},{int(dy)})")
+
+    async def click(self, x, y):
+        await self._page._eval(
+            f"(()=>{{const el=document.elementFromPoint({int(x)},{int(y)});"
+            f"if(el)el.click();return true;}})()")
+
+
+class _NDKeyboard:
+    def __init__(self, page):
+        self._page = page
+
+    async def press(self, key):
+        await self._page._eval(
+            f"(()=>{{const e=new KeyboardEvent('keydown',{{key:{_js_str(key)},"
+            f"keyCode:27,which:27,bubbles:true}});document.dispatchEvent(e);"
+            f"document.activeElement&&document.activeElement.dispatchEvent(e);return true;}})()")
+
+
+class NodriverPage:
+    """Adapts a nodriver Tab to the Playwright `page` API subset the scraper uses,
+    so demo_login / tab_labels / open_tab / scrape_* / enrich_detail run unchanged."""
+    def __init__(self, browser, tab):
+        self._browser, self._tab = browser, tab
+        self._url = SITE + "/"
+        self.mouse = _NDMouse(self)
+        self.keyboard = _NDKeyboard(self)
+
+    async def _eval(self, js):
+        """Run a raw JS expression and return the value (handles nodriver API drift)."""
+        try:
+            return await self._tab.evaluate(js, await_promise=False, return_by_value=True)
+        except TypeError:
+            return await self._tab.evaluate(js)
+
+    async def evaluate(self, fn, arg=None):
+        """Playwright-style: `fn` is a JS function source; call it with `arg`."""
+        call = "" if arg is None else json.dumps(arg)
+        return await self._eval(f"({fn})({call})")
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self._tab = await self._browser.get(url)
+        self._url = url
+
+    async def wait_for_timeout(self, ms):
+        await asyncio.sleep(ms / 1000)
+
+    async def wait_for_selector(self, selector, timeout=10000):
+        deadline = time.monotonic() + timeout / 1000
+        check = f"(()=>!!document.querySelector({_js_str(selector)}))()"
+        while time.monotonic() < deadline:
+            try:
+                if await self._eval(check):
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+        raise RuntimeError(f"wait_for_selector timeout: {selector}")
+
+    async def query_selector(self, css):
+        present = await self._eval(f"(()=>!!document.querySelector({_js_str(css)}))()")
+        return _NDElement(self, css) if present else None
+
+    def locator(self, selector):
+        return _NDLocator(self, selector)
+
+    async def go_back(self, wait_until=None):
+        await self._eval("window.history.back()")
+
+    async def title(self):
+        try:
+            return await self._eval("document.title") or ""
+        except Exception:
+            return ""
+
+    @property
+    def url(self):
+        return self._url
+
+    async def screenshot(self, path=None, full_page=False):
+        try:
+            await self._tab.save_screenshot(path)
+        except Exception:
+            pass
+
+
+async def _nd_export_state(browser, path):
+    """Dump nodriver's cookies into Playwright storage_state JSON, so a later
+    Playwright engine can reuse the Cloudflare-cleared session (cookie-warmer)."""
+    try:
+        cookies = await browser.cookies.get_all()
+    except Exception as e:
+        print(f"  [nodriver] cookie export skipped: {e}", file=sys.stderr)
+        return
+    same = {"strict": "Strict", "lax": "Lax", "none": "None"}
+    out = {"cookies": [], "origins": []}
+    for c in cookies:
+        try:
+            exp = getattr(c, "expires", None)
+            out["cookies"].append({
+                "name": c.name, "value": c.value,
+                "domain": c.domain, "path": getattr(c, "path", "/") or "/",
+                "expires": float(exp) if exp not in (None, -1) else -1,
+                "httpOnly": bool(getattr(c, "http_only", False)),
+                "secure": bool(getattr(c, "secure", False)),
+                "sameSite": same.get(str(getattr(c, "same_site", "") or "").split(".")[-1].lower(), "Lax"),
+            })
+        except Exception:
+            continue
+    try:
+        with open(path, "w") as f:
+            json.dump(out, f)
+        print(f"  [nodriver] exported {len(out['cookies'])} cookies → {path}")
+    except Exception as e:
+        print(f"  [nodriver] could not write state: {e}", file=sys.stderr)
+
+
+async def open_engine(name, headless):
+    """Launch one engine. Returns (page, on_login_saved, aclose).
+    `on_login_saved` is an async fn(page) to persist the session post-login.
+    Raises ModuleNotFoundError if the engine isn't installed."""
+    state_kw = {}
+    if os.path.exists(STATE_FILE):
+        state_kw["storage_state"] = STATE_FILE
+
+    # ---- nodriver (native API, wrapped in the adapter) ----
+    if name == "nodriver":
+        import nodriver as uc
+        browser = await uc.start(headless=headless, browser_args=["--lang=en-US"])
+        if os.path.exists(STATE_FILE):
+            try:  # warm-start: load any saved cookies before first navigation
+                data = json.load(open(STATE_FILE))
+                params = [uc.cdp.network.CookieParam(
+                    name=c["name"], value=c["value"], domain=c.get("domain"),
+                    path=c.get("path", "/"), secure=c.get("secure", False),
+                    http_only=c.get("httpOnly", False)) for c in data.get("cookies", [])]
+                if params:
+                    await browser.cookies.set_all(params)
+                    print(f"[nodriver] loaded {len(params)} saved cookies")
+            except Exception as e:
+                print(f"[nodriver] cookie warm-start skipped: {e}", file=sys.stderr)
+        tab = await browser.get(SITE + "/")
+        page = NodriverPage(browser, tab)
+
+        async def aclose():
+            try:
+                r = browser.stop()
+                if hasattr(r, "__await__"):
+                    await r
+            except Exception:
+                pass
+
+        return page, (lambda p: _nd_export_state(browser, STATE_FILE)), aclose
+
+    # ---- camoufox (stealth Firefox; Playwright API) ----
+    if name == "camoufox":
+        from camoufox.async_api import AsyncCamoufox
+        cf = AsyncCamoufox(headless=headless)
+        browser = await cf.__aenter__()
+        # No UA override — camoufox supplies a consistent fingerprint itself.
+        ctx = await browser.new_context(locale="en-US",
+                                        viewport={"width": 1440, "height": 1100}, **state_kw)
+        await ctx.route("**/*", block_assets)
+        page = await ctx.new_page()
+
+        async def aclose():
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+            try:
+                await cf.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+        async def save(_p):
+            await ctx.storage_state(path=STATE_FILE)
+        return page, save, aclose
+
+    # ---- patchright / rebrowser-playwright / stock playwright (Playwright API) ----
+    if name == "patchright":
+        from patchright.async_api import async_playwright as pw
+    elif name in ("rebrowser", "rebrowser-playwright", "rebrowser_playwright"):
+        from rebrowser_playwright.async_api import async_playwright as pw
+    elif name == "playwright":
+        from playwright.async_api import async_playwright as pw
+    else:
+        raise ValueError(f"unknown engine: {name}")
+
+    p = await pw().start()
+    browser = await p.chromium.launch(channel="chrome", headless=headless)
+    ctx = await browser.new_context(locale="en-US", user_agent=UA,
+                                    viewport={"width": 1440, "height": 1100}, **state_kw)
+    await ctx.route("**/*", block_assets)
+    page = await ctx.new_page()
+
+    async def aclose():
+        for closer in (ctx.close, browser.close, p.stop):
+            try:
+                await closer()
+            except Exception:
+                pass
+
+    async def save(_p):
+        await ctx.storage_state(path=STATE_FILE)
+    return page, save, aclose
+
+
+async def run_engine(name, args, stop):
+    """Bring up one engine, log in, then run the scrape loop on it.
+    Returns True if it ran a pass; raises if bring-up/login failed."""
+    headless = not args.headed
+    if os.path.exists(STATE_FILE):
+        print(f"[{name}] reusing saved session: {STATE_FILE}")
+    page, save, aclose = await open_engine(name, headless)
+    try:
+        await demo_login(page)
+        try:
+            await save(page)
+            print(f"[{name}] saved session: {STATE_FILE}")
+        except Exception as e:
+            print(f"[{name}] could not save session: {e}", file=sys.stderr)
+
+        async with httpx.AsyncClient() as client:
+            n = 0
+            while not stop.is_set():
+                t0 = time.monotonic()
+                n += 1
+                tm, to, nsports = await one_pass(client, page)
+                dt = (time.monotonic() - t0) * 1000
+                print(f"[{name}] pass {n}: {tm} matches, {to} odds across {nsports} sports in {dt:.0f}ms\n")
+                if args.loop <= 0:
+                    break
+                sleep = max(0, args.loop - (time.monotonic() - t0))
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=sleep)
+                except asyncio.TimeoutError:
+                    pass
+        return True
+    finally:
+        print(f"[{name}] shutting down (browser closing)...")
+        await aclose()
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--loop", type=float, default=0, help="seconds between passes (0 = single pass)")
     ap.add_argument("--headed", action="store_true")
+    ap.add_argument("--engine", help="force one engine (overrides D247_ENGINES)")
     args = ap.parse_args()
 
     stop = asyncio.Event()
@@ -590,44 +947,27 @@ async def main():
         except NotImplementedError:
             pass
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(channel="chrome", headless=not args.headed)
-        # Reuse a previous session if we have one — skips Cloudflare + login.
-        state_kw = {}
-        if os.path.exists(STATE_FILE):
-            state_kw["storage_state"] = STATE_FILE
-            print(f"reusing saved session: {STATE_FILE}")
-        ctx = await browser.new_context(locale="en-US", user_agent=UA,
-                                        viewport={"width": 1440, "height": 1100},
-                                        **state_kw)
-        # Drop images/fonts/media — we only scrape DOM text.
-        await ctx.route("**/*", block_assets)
-        page = await ctx.new_page()
-        await demo_login(page)
-        # Persist the now-logged-in state so the next restart starts warm.
+    engines = [args.engine.strip().lower()] if args.engine else ENGINE_ORDER
+    last_err = None
+    for name in engines:
+        if stop.is_set():
+            break
         try:
-            await ctx.storage_state(path=STATE_FILE)
-            print(f"saved session: {STATE_FILE}")
+            await run_engine(name, args, stop)
+            return  # an engine carried the whole run; done
+        except ModuleNotFoundError as e:
+            print(f"[{name}] not installed ({e}); trying next engine", file=sys.stderr)
         except Exception as e:
-            print(f"could not save session state: {e}", file=sys.stderr)
-
-        async with httpx.AsyncClient() as client:
-            n = 0
-            while not stop.is_set():
-                t0 = time.monotonic()
-                n += 1
-                tm, to, nsports = await one_pass(client, page)
-                dt = (time.monotonic() - t0) * 1000
-                print(f"pass {n}: {tm} matches, {to} odds across {nsports} sports in {dt:.0f}ms\n")
-                if args.loop <= 0:
-                    break
-                sleep = max(0, args.loop - (time.monotonic() - t0))
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=sleep)
-                except asyncio.TimeoutError:
-                    pass
-        print("shutting down (browser closing)...")
-        await browser.close()
+            last_err = e
+            print(f"[{name}] failed: {e}; trying next engine\n", file=sys.stderr)
+            # A nodriver run that cleared Cloudflare leaves cookies in STATE_FILE,
+            # so subsequent Playwright engines get a warm start automatically.
+    if last_err:
+        print(f"all engines exhausted; last error: {last_err}", file=sys.stderr)
+        sys.exit(1)
+    print("no engine available — install one of: "
+          "patchright, rebrowser-playwright, camoufox, playwright, nodriver", file=sys.stderr)
+    sys.exit(1)
 
 
 if __name__ == "__main__":
