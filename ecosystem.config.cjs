@@ -50,6 +50,12 @@ const FRONTEND_PORT = process.env.FRONTEND_PORT || '3100';
 const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${BACKEND_PORT}`;
 const INGEST_KEY = process.env.INGEST_KEY || backendEnv.INGEST_KEY || 'dev-ingest-key';
 
+// d247 sits behind Cloudflare AND blocks this server's IP, so its scraper must
+// egress through an India residential proxy. Keep the secret OUT of git — set it
+// in backend/.env (gitignored) as a STICKY session URL, e.g.:
+//   D247_PROXY=http://USER_area-IN_session-d247prod1_life-30:PASS@proxy.smartproxy.net:3120
+const D247_PROXY = process.env.D247_PROXY || backendEnv.D247_PROXY || '';
+
 const scraperEnv = { BACKEND_URL, INGEST_KEY };
 
 // Defaults shared by every process.
@@ -69,7 +75,7 @@ function logs(name) {
   };
 }
 
-function scraper(name, script, loop) {
+function scraper(name, script, loop, opts = {}) {
   return {
     ...common,
     ...logs(name),
@@ -77,8 +83,10 @@ function scraper(name, script, loop) {
     cwd: SCRAPER_DIR,
     interpreter: VENV_PY,
     script,
-    args: `--loop ${loop}`,
-    env: scraperEnv,
+    // opts.engine pins a browser engine (e.g. 'playwright' when an auth proxy is
+    // used — auth proxies only work on the Playwright-based engines, not nodriver).
+    args: `--loop ${loop}${opts.engine ? ` --engine ${opts.engine}` : ''}`,
+    env: { ...scraperEnv, ...(opts.env || {}) },
   };
 }
 
@@ -107,7 +115,12 @@ module.exports = {
     scraper('scrape_betwinner', 'scrape_betwinner.py', 30),
     scraper('scrape_megapari', 'scrape_megapari.py', 30),
     scraper('scrape_1win', 'scrape_1win.py', 20),
-    scraper('scrape_d247', 'scrape_d247.py', 150),
+    // d247: force the Playwright engine (auth proxy support) and inject the
+    // residential proxy when D247_PROXY is set in backend/.env.
+    scraper('scrape_d247', 'scrape_d247.py', 150, {
+      engine: 'playwright',
+      env: D247_PROXY ? { D247_PROXY } : {},
+    }),
     scraper('scrape_bcgame', 'scrape_bcgame.py', 30),
   ],
 };
