@@ -63,7 +63,11 @@ async fn main() -> anyhow::Result<()> {
     // supervised here as a managed process: auto-starts on boot and is toggled
     // at runtime via the `page_sync_enabled` setting. The legacy JSON-feed
     // scheduler is intentionally NOT started (it produced coded markets).
-    page_sync::spawn_supervisor(state.clone());
+    // DISABLE_PAGE_SYNC=1 skips the supervisor (e.g. a second/test backend on the
+    // same DB that must not spawn a duplicate melbet scraper child).
+    if std::env::var("DISABLE_PAGE_SYNC").as_deref() != Ok("1") {
+        page_sync::spawn_supervisor(state.clone());
+    }
 
     // Fold request_events -> usage_rollup periodically (powers analytics + billing).
     jobs::scheduler::spawn_rollup(state.clone());

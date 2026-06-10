@@ -84,7 +84,10 @@ EXTRACT_JS = r"""
         // Take the DESKTOP odd columns BY POSITION so a row keeps its full column
         // shape whether priced, dashed or padlocked (a suspended row must not
         // vanish). Fall back to all odd cells if the desktop variant isn't there.
-        const lockSel = '.fa-lock, i.icon-lock, [class*="lock" i], [class*="suspend" i], .suspended-box';
+        // NB: do NOT use [class*="lock"] — it also matches Bootstrap "block"
+        // classes (d-block, inline-block) → every cell looks locked. Use specific
+        // padlock / suspended markers only.
+        const lockSel = '.fa-lock, .fa-lock-alt, i.icon-lock, .icon-lock, .suspended-box, [class*="suspend" i], [class*="padlock" i]';
         const isDash = t => { const c = (t || '').replace(/\s+/g, ' ').trim(); return c === '' || c === '-' || c === '--'; };
         let cols = [...row.querySelectorAll('.bet-nation-odd:not(.d-xl-none)')];
         if (!cols.length) cols = [...row.querySelectorAll('.bet-nation-odd')];
@@ -282,7 +285,8 @@ EXTRACT_DETAIL_JS = r"""
     const num = s => { const n = parseFloat(clean(s).replace(',', '.')); return isNaN(n) ? null : n; };
     const header = document.querySelector('.game-header');
     const score = header ? clean(header.innerText).slice(0, 200) : null;
-    const lockSel = '.fa-lock, i.icon-lock, [class*="lock" i], [class*="suspend" i], [class*="status" i]';
+    // Specific lock markers only — [class*="lock"] also matches "block" classes.
+    const lockSel = '.fa-lock, .fa-lock-alt, i.icon-lock, .icon-lock, .suspended-box, [class*="suspend" i], [class*="padlock" i]';
     const isLocked = el => {
         if (!el) return false;
         if (el.querySelector(lockSel)) return true;
@@ -374,9 +378,17 @@ def to_native_event(m):
     markets = []
     for mk in order:
         runners = list(groups[mk].values())
+        # Ground truth for "locked": a runner with NO back AND NO lay price can't
+        # be bet → suspended. This is exactly what d247 shows ("- -"), and it's
+        # immune to selector quirks in the list lock-icon detection.
+        for rr in runners:
+            rr["suspended"] = not rr["back"] and not rr["lay"]
         msusp = bool(runners) and all(rr["suspended"] for rr in runners)
         gtype = "fancy1" if ("fancy" in mk.lower() or "session" in mk.lower()) else "match"
         markets.append({"market": mk, "gtype": gtype, "suspended": msusp, "runners": runners})
+
+    # The event is suspended only when NOTHING is priced anywhere.
+    has_price = any((rr["back"] or rr["lay"]) for mm in markets for rr in mm["runners"])
 
     return {
         "gmid": gmid, "etid": etid, "sport": m.get("sport") or "",
@@ -384,7 +396,7 @@ def to_native_event(m):
         "ename": ename, "home": home, "away": away,
         "iplay": m.get("status") == "live",
         "stime": m.get("time"),
-        "suspended": bool(m.get("suspended")),
+        "suspended": not has_price,
         "featured": bool(m.get("featured")),
         "header": False,
         "markets": markets,

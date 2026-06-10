@@ -198,23 +198,39 @@ async fn d247_snapshot(
         }
     }
 
-    // Retire events no longer present (grace-aware, like the shared snapshot).
+    // Retire events no longer present — SCOPED to the sports (etids) in THIS
+    // snapshot, like the shared snapshot's per-sport sweep. A per-sport pass only
+    // carries one sport's gmids, so an unscoped sweep would wipe every OTHER
+    // sport's events. Grace-aware: a match missing from this pass is only dropped
+    // once it has gone un-scraped for the grace window.
     if snap.sweep && !seen.is_empty() {
+        let etids: Vec<i32> = {
+            let mut s: std::collections::HashSet<i32> = std::collections::HashSet::new();
+            for e in &snap.events {
+                s.insert(e.etid);
+            }
+            s.into_iter().collect()
+        };
         if snap.sweep_grace_seconds > 0 {
             sqlx::query(
                 "UPDATE diamondexch_events SET dead = true
-                 WHERE dead = false AND gmid <> ALL($1)
-                   AND updated_at < now() - make_interval(secs => $2)",
+                 WHERE dead = false AND etid = ANY($1) AND gmid <> ALL($2)
+                   AND updated_at < now() - make_interval(secs => $3)",
             )
+            .bind(&etids)
             .bind(&seen)
             .bind(snap.sweep_grace_seconds as f64)
             .execute(&mut *tx)
             .await?;
         } else {
-            sqlx::query("UPDATE diamondexch_events SET dead = true WHERE dead = false AND gmid <> ALL($1)")
-                .bind(&seen)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE diamondexch_events SET dead = true
+                 WHERE dead = false AND etid = ANY($1) AND gmid <> ALL($2)",
+            )
+            .bind(&etids)
+            .bind(&seen)
+            .execute(&mut *tx)
+            .await?;
         }
     }
 
