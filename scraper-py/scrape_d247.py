@@ -277,6 +277,185 @@ D247_WORKERS = max(1, int(os.environ.get("D247_WORKERS", "4")))
 # this long age out. ~0 disables (immediate retire). Default 360s (6 min).
 SWEEP_GRACE_SECONDS = int(os.environ.get("D247_SWEEP_GRACE", "360"))
 
+# ── Native capture ────────────────────────────────────────────────────────────
+# d247's API responses are CryptoJS-encrypted, but the app DECRYPTS them and
+# JSON.parse()s the result before rendering. We wrap JSON.parse (installed before
+# any app script via add_init_script) and stash every decrypted API payload that
+# carries match data. This hands us the EXACT native feed — cname, cid, mid, sid,
+# matched size, clean stime, full market ladders (back1/2/3, lay1/2/3), and every
+# market type (Bookmaker, Fancy, oddeven, …) — with no DOM parsing and no need to
+# break the encryption ourselves.
+#   window.__dxlist   = [ data, … ]   from list endpoints (data.t1 / data.t2)
+#   window.__dxdetail = { gmid: [markets] }  from detail endpoints (data.odds)
+CAPTURE_HOOK = r"""
+(() => {
+  if (window.__dxHooked) return; window.__dxHooked = true;
+  window.__dxlist = []; window.__dxdetail = {};
+  const orig = JSON.parse;
+  JSON.parse = function (t) {
+    const v = orig.apply(this, arguments);
+    try {
+      const d = v && v.data;
+      if (d) {
+        if (Array.isArray(d.t1) || Array.isArray(d.t2)) {
+          window.__dxlist.push({ t1: d.t1 || [], t2: d.t2 || [] });
+          if (window.__dxlist.length > 60) window.__dxlist.shift();
+        }
+        if (d.odds && typeof d.odds === 'object' && !Array.isArray(d.odds)) {
+          for (const g in d.odds) window.__dxdetail[g] = d.odds[g];
+        }
+      }
+    } catch (e) {}
+    return v;
+  };
+})();
+"""
+
+
+def _num(x):
+    try:
+        f = float(x)
+        return f if f == f and f not in (float("inf"), float("-inf")) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _oname_idx(oname):
+    m = re.search(r"(\d+)", oname or "")
+    return int(m.group(1)) if m else 1
+
+
+def native_market_to_lean(mkt):
+    """Convert ONE native market object (gmid match-obj from a list, or a market
+    from data.odds) into our lean market: { market, gtype, suspended,
+    runners:[{nat, suspended, back:[{odds,size}], lay:[{odds,size}]}] }."""
+    mname = (mkt.get("mname") or "Market").strip() or "Market"
+    gtype = mkt.get("gtype") or "match"
+    msusp = str(mkt.get("status", "")).upper() == "SUSPENDED"
+    runners = []
+    for s in mkt.get("section", []) or []:
+        nat = (s.get("nat") or "").strip()
+        if not nat:
+            continue
+        backs, lays = [], []
+        for o in s.get("odds", []) or []:
+            price = _num(o.get("odds"))
+            if price is None or price < 1.0:
+                continue
+            entry = ({"odds": round(price, 3), "size": _num(o.get("size")) or 0},
+                     _oname_idx(o.get("oname")))
+            if str(o.get("otype", "")).lower() == "back":
+                backs.append(entry)
+            elif str(o.get("otype", "")).lower() == "lay":
+                lays.append(entry)
+        backs.sort(key=lambda e: e[1])  # back1, back2, back3 …
+        lays.sort(key=lambda e: e[1])
+        rsusp = msusp or str(s.get("gstatus", "")).upper() == "SUSPENDED"
+        runners.append({
+            "nat": nat, "sid": s.get("sid") or 0, "suspended": rsusp,
+            "back": [e[0] for e in backs], "lay": [e[0] for e in lays],
+        })
+    return {"market": mname, "gtype": gtype, "mid": mkt.get("mid") or 0,
+            "suspended": msusp, "runners": runners}
+
+
+def native_match_to_event(mm, sport_name):
+    """A native LIST match object (carries the MATCH_ODDS market inline) → our
+    d247 ingest event, with full native fields (cname/cid/mid/size/stime)."""
+    gmid = mm.get("gmid")
+    gmid = int(gmid) if isinstance(gmid, int) or (isinstance(gmid, str) and gmid.isdigit()) else None
+    if gmid is None:
+        return None  # skip casino/lottery rows whose gmid is a slug
+    ename = (mm.get("ename") or "").strip()
+    teams = split_teams(ename)
+    home, away = teams if teams else (ename, "")
+    return {
+        "gmid": gmid,
+        "etid": mm.get("etid") or 0,
+        "sport": sport_name or "",
+        "cid": mm.get("cid") or 0,
+        "cname": (mm.get("cname") or "").strip(),
+        "ename": ename, "home": home, "away": away,
+        "iplay": bool(mm.get("iplay")),
+        "stime": mm.get("stime"),
+        "suspended": str(mm.get("status", "")).upper() == "SUSPENDED",
+        "featured": bool(mm.get("f")),
+        "header": False,
+        # The list match-obj IS the MATCH_ODDS market.
+        "markets": [native_market_to_lean(mm)],
+    }
+
+
+# etid → sport name, filled from the sidebar catalog (which carries both).
+ETID_NAME = {}
+
+
+async def collect_native_events(page):
+    """Read the JSON.parse-captured native LIST payloads and return events grouped
+    by etid (sport). Dedupes by gmid (last-seen wins). Clears the buffer."""
+    try:
+        payloads = await page.evaluate("() => { const x = window.__dxlist || []; window.__dxlist = []; return x; }")
+    except Exception:
+        return {}
+    by_gmid = {}
+    for pl in payloads or []:
+        for arr in (pl.get("t1") or [], pl.get("t2") or []):
+            for mm in arr:
+                etid = mm.get("etid") or 0
+                ev = native_match_to_event(mm, ETID_NAME.get(etid, sport_name_for_etid(etid)))
+                if ev:
+                    by_gmid[ev["gmid"]] = ev
+    groups = {}
+    for ev in by_gmid.values():
+        groups.setdefault(ev["etid"], []).append(ev)
+    return groups
+
+
+def sport_name_for_etid(etid):
+    """Best-effort name when the sidebar map doesn't have it."""
+    known = {4: "Cricket", 1: "Football", 2: "Tennis", 8: "Table Tennis"}
+    return known.get(etid, f"Sport {etid}")
+
+
+async def collect_native_detail(page, gmid):
+    """Read the captured native DETAIL markets (data.odds[gmid]) for one match and
+    return a list of lean markets (ALL markets: Match Odds ladder, Bookmaker,
+    Fancy, oddeven, …). Empty if the detail wasn't captured."""
+    try:
+        raw = await page.evaluate(
+            "(g) => { const d = (window.__dxdetail || {})[g]; return d || null; }", str(gmid)
+        )
+    except Exception:
+        raw = None
+    if not raw:
+        # Some builds key the dict by int; try the numeric form too.
+        try:
+            raw = await page.evaluate("(g) => (window.__dxdetail || {})[g] || null", gmid)
+        except Exception:
+            raw = None
+    if not raw:
+        return []
+    return [native_market_to_lean(mkt) for mkt in raw]
+
+
+async def post_d247_native(client, source, events, sweep=False):
+    """POST already-built native events (from capture) to /api/ingest/d247."""
+    payload = {
+        "source": source, "events": events, "sweep": sweep,
+        "sweep_grace_seconds": SWEEP_GRACE_SECONDS if sweep else 0,
+    }
+    try:
+        r = await client.post(
+            f"{BACKEND_URL}/api/ingest/d247",
+            headers={"X-Ingest-Key": INGEST_KEY},
+            json=payload, timeout=30,
+        )
+        r.raise_for_status()
+        return len(events)
+    except Exception as e:
+        print(f"  d247 native POST failed ({source}): {e}", file=sys.stderr)
+        return 0
+
 # Read a match DETAIL page: live scorecard + every market (Match Odds back/lay,
 # Bookmaker, Fancy/session/odd-even) with best back & lay prices.
 EXTRACT_DETAIL_JS = r"""
@@ -363,10 +542,13 @@ def to_native_event(m):
             groups[mk] = {}
             order.append(mk)
         nat = o.get("outcome") or ""
-        r = groups[mk].get(nat)
+        # Key runners case-insensitively so "ARCS Andheri" (detail) doesn't become
+        # a 2nd runner next to "Arcs Andheri" (list). Keep the first-seen display.
+        rkey = nat.strip().lower()
+        r = groups[mk].get(rkey)
         if r is None:
             r = {"nat": nat, "suspended": False, "back": [], "lay": []}
-            groups[mk][nat] = r
+            groups[mk][rkey] = r
         back, lay, size = o.get("value"), o.get("lay"), o.get("volume")
         if back is not None and back >= 1.0:
             r["back"].append({"odds": back, "size": size or 0})
@@ -774,16 +956,21 @@ def merge_detail(m, detail):
     """Fold a detail page's markets + score into a list-built match in place."""
     if not detail:
         return False
+    # The detail page's .game-header text is the live scoreboard (it also repeats
+    # the team names). Put it in `period`, NOT `time` — `time` must stay the clean
+    # start-time string from the list, else stime gets polluted with team names.
     if detail.get("score"):
-        m["time"] = detail["score"][:160]
-        m["period"] = "live"
+        m["period"] = detail["score"][:160]
     # Carry the event-level suspended flag from the detail page.
     if detail.get("suspended"):
         m["suspended"] = True
-    seen = {(o["market"], o["outcome"]) for o in m["markets"]}
+    # Dedupe runners case/space-insensitively so the detail page's UPPERCASE team
+    # names don't create a second runner alongside the list's title-case ones.
+    norm = lambda mk, oc: (mk.strip().lower(), oc.strip().lower())
+    seen = {norm(o["market"], o["outcome"]) for o in m["markets"]}
     added = 0
     for o in detail_to_odds(detail):
-        key = (o["market"], o["outcome"])
+        key = norm(o["market"], o["outcome"])
         if key not in seen:
             m["markets"].append(o)
             seen.add(key)
@@ -851,6 +1038,10 @@ async def scrape_sidebar(client, page):
         # etid) so /sports + /sidebar list every sport, not just ones with
         # current matches. sweep_sports makes the catalog authoritative each pass.
         catalog = [{"name": s["name"], "etid": int(s.get("etid") or 0)} for s in sports]
+        # Build etid → name so native-capture events get a sport name.
+        for c in catalog:
+            if c["etid"]:
+                ETID_NAME[c["etid"]] = c["name"]
         try:
             cr = await client.post(
                 f"{BACKEND_URL}/api/ingest/d247",
@@ -967,6 +1158,13 @@ async def scrape_sport(client, page, idx, sport):
     screenful. We extract repeatedly WHILE scrolling down and accumulate every
     row by href, capturing the full list (including rows whose odds are all "-").
     """
+    # Clear the native-capture buffer BEFORE navigating so what we read after the
+    # tab opens belongs to THIS sport (d247 polls frequently; a shared buffer fills
+    # with other sports' payloads otherwise).
+    try:
+        await page.evaluate("() => { window.__dxlist = []; }")
+    except Exception:
+        pass
     if not await open_tab(page, idx, light=True):  # we drive our own scroll below
         return 0, 0, []
     # Start at the very top of the list (scroll the container up hard).
@@ -1035,8 +1233,11 @@ async def scrape_sport(client, page, idx, sport):
     # no longer listed (so the next API response shows only the current set).
     src = f"d247-{sport.lower().replace(' ', '-')}"
     mm, oo = await post_snapshot(client, src, matches, sweep=True)   # shared (admin)
-    await post_d247(client, src, matches, sweep=True)               # native d247 table
-    print(f"  [{sport}] {len(matches)} matches → {mm} upserted, {oo} odds ({len(live)} live)")
+    # The d247 NATIVE table is fed from the JSON.parse capture (full fidelity:
+    # cname/cid/mid/sid/size/ladders) collected NOW for THIS sport.
+    nat = await collect_and_post_native_sport(client, page, sport)
+    print(f"  [{sport}] {len(matches)} matches → {mm} upserted, {oo} odds "
+          f"({len(live)} live, {nat} native)")
     return mm, oo, live
 
 
@@ -1074,10 +1275,27 @@ async def enrich_detail(client, page, idx, sport, m):
     except Exception:
         pass
     changed = merge_detail(m, detail)
+    src = f"d247-{sport.lower().replace(' ', '-')}-detail"
     if changed:
-        src = f"d247-{sport.lower().replace(' ', '-')}-detail"
-        await post_snapshot(client, src, [m])   # shared (admin)
-        await post_d247(client, src, [m])        # native d247 table (full markets)
+        await post_snapshot(client, src, [m])   # shared (admin), DOM-derived
+    # NATIVE detail: the app fetched gamedetailPrivate when we opened the page →
+    # the JSON.parse hook captured the FULL market tree (Match Odds ladder,
+    # Bookmaker, Fancy, oddeven, …). Post that to the d247 table — full fidelity.
+    gmid = m.get("ext_id")
+    if gmid is not None:
+        markets = await collect_native_detail(page, gmid)
+        if markets:
+            ename = m.get("name") or f"{m.get('home','')} v {m.get('away','')}"
+            ev = {
+                "gmid": gmid, "etid": etid_from_href(href) or sport_etid(sport),
+                "sport": sport, "cid": 0, "cname": "",
+                "ename": ename, "home": m.get("home") or "", "away": m.get("away") or "",
+                "iplay": m.get("status") == "live", "stime": m.get("time"),
+                "suspended": all(mk.get("suspended") for mk in markets),
+                "featured": False, "header": False, "markets": markets,
+            }
+            await post_d247_native(client, src, [ev])
+            changed = True
     # Return to the list view for the next enrichment.
     try:
         await page.go_back(wait_until="domcontentloaded")
@@ -1124,6 +1342,33 @@ async def one_pass(client, page):
     if live_targets:
         print(f"  detail-enriched {enriched}/{min(len(live_targets), DETAIL_CAP)} live matches")
     return total_m, total_o, len(labels)
+
+
+async def collect_and_post_native_sport(client, page, sport):
+    """Read the native-capture buffer (just THIS sport's list payload, since
+    scrape_sport cleared it before navigating), convert to events using the known
+    sport name, and POST to the d247 table per etid with sweep."""
+    try:
+        payloads = await page.evaluate("() => { const x = window.__dxlist || []; window.__dxlist = []; return x; }")
+    except Exception:
+        return 0
+    by_gmid = {}
+    for pl in payloads or []:
+        for arr in (pl.get("t1") or [], pl.get("t2") or []):
+            for mm in arr:
+                ev = native_match_to_event(mm, sport)
+                if ev:
+                    by_gmid[ev["gmid"]] = ev
+    if not by_gmid:
+        return 0
+    groups = {}
+    for ev in by_gmid.values():
+        groups.setdefault(ev["etid"], []).append(ev)
+    src = f"d247-native-{sport.lower().replace(' ', '-')}"
+    total = 0
+    for etid, events in groups.items():
+        total += await post_d247_native(client, src, events, sweep=True)
+    return total
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1224,6 +1469,9 @@ async def one_pass_parallel(client, pages):
 
     # Phase 1 — parallel list sweep across ALL sports.
     total_m, total_o, live_targets = await sweep_parallel(client, pages, labels)
+
+    # Native capture is collected per-sport inside scrape_sport (each on its own
+    # worker page, buffer cleared before each navigation).
 
     # Phase 2 — parallel detail enrichment (bounded by cap, live first).
     targets = live_targets[:DETAIL_CAP]
@@ -1608,6 +1856,7 @@ async def open_engine(name, headless):
                                         viewport={"width": 1440, "height": 1100},
                                         **({"proxy": px} if px else {}), **state_kw)
         await ctx.route("**/*", block_assets)
+        await ctx.add_init_script(CAPTURE_HOOK)
         page = await ctx.new_page()
 
         async def aclose():
@@ -1645,6 +1894,7 @@ async def open_engine(name, headless):
                                     viewport={"width": 1440, "height": 1100},
                                     **({"proxy": px} if px else {}), **state_kw)
     await ctx.route("**/*", block_assets)
+    await ctx.add_init_script(CAPTURE_HOOK)
     page = await ctx.new_page()
 
     async def aclose():

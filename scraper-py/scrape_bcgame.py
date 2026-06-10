@@ -132,6 +132,24 @@ def _to_float(x):
         return None
 
 
+def fmt_time(v):
+    """Normalize a start time to a display STRING. BetBy `scheduled` is a unix
+    timestamp (seconds, sometimes ms); the ingest's `time` field is a string, so
+    a raw int would 422 the whole chunk. Pass strings through; format numbers."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        try:
+            ts = float(v)
+            if ts > 1e12:  # milliseconds → seconds
+                ts /= 1000.0
+            from datetime import datetime, timezone
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return str(v)
+    return str(v)
+
+
 # BetBy outcome/market status flags vary by feed version; treat anything that is
 # explicitly NOT one of these "open" values (or that lacks a price) as suspended.
 _OPEN_STATUS = {0, 1, "0", "1", "active", "open", "Active", "Open"}
@@ -246,7 +264,7 @@ def build_matches(events, sports, tours, markets, status):
                 "sport": sport, "league": league,
                 "home": home, "away": away, "status": status,
                 "home_score": hs, "away_score": as_,
-                "time": match_time or scheduled, "period": None,
+                "time": match_time or fmt_time(scheduled), "period": None,
                 "suspended": ev_susp,
                 "markets": odds,
                 "home_logo": None, "away_logo": None, "sport_logo": None, "league_logo": None,
@@ -268,7 +286,7 @@ def build_matches(events, sports, tours, markets, status):
                 "sport": sport, "league": league,
                 "home": ev_name, "away": "", "status": status,
                 "home_score": None, "away_score": None,
-                "time": scheduled, "period": None,
+                "time": fmt_time(scheduled), "period": None,
                 "suspended": ev_susp,
                 "markets": odds,
                 "home_logo": None, "away_logo": None, "sport_logo": None, "league_logo": None,

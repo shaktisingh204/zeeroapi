@@ -314,7 +314,12 @@ pub struct IngestMatch {
     pub status: String,
     pub home_score: Option<i32>,
     pub away_score: Option<i32>,
+    #[serde(default, deserialize_with = "de_loose_string")]
     pub period: Option<String>,
+    // Tolerant: some feeds send a numeric start time (e.g. BetBy `scheduled` is a
+    // unix int). Coerce numbers to strings so one numeric field never 422s — and
+    // drops — an entire ingest chunk.
+    #[serde(default, deserialize_with = "de_loose_string")]
     pub time: Option<String>,
     pub home_logo: Option<String>,
     pub away_logo: Option<String>,
@@ -335,6 +340,24 @@ pub struct IngestMatch {
 
 fn default_status() -> String {
     "prematch".into()
+}
+
+/// Accept a string, number, bool or null and coerce to Option<String>. Lets the
+/// ingest tolerate feeds that send a numeric value where we expect a string
+/// (e.g. a unix-int start time) instead of rejecting the whole chunk.
+fn de_loose_string<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Option::<Value>::deserialize(d)?;
+    Ok(match v {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        Some(Value::Bool(b)) => Some(b.to_string()),
+        Some(other) => Some(other.to_string()),
+    })
 }
 
 #[derive(Debug, Deserialize)]

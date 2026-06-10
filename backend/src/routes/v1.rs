@@ -316,12 +316,13 @@ fn dx_native_market(gmid: i64, lean: &Value, sno: i64, iplay: bool, event_susp: 
     let mut srno = 1i64;
     for r in runners {
         let nat = r.get("nat").and_then(|v| v.as_str()).unwrap_or("");
+        let sid = r.get("sid").and_then(|v| v.as_i64()).unwrap_or(0);
         let rsusp = msusp || r.get("suspended").and_then(|v| v.as_bool()).unwrap_or(false);
         let mut odds = dx_levels(r.get("back").and_then(|v| v.as_array()), "back", "BACK", rsusp);
         odds.extend(dx_levels(r.get("lay").and_then(|v| v.as_array()), "lay", "LAY", rsusp));
         ocnt += odds.len();
         sections.push(json!({
-            "sid": 0, "psid": 0, "sno": srno, "psrno": srno,
+            "sid": sid, "psid": 0, "sno": srno, "psrno": srno,
             "gstatus": if rsusp { "SUSPENDED" } else { "ACTIVE" },
             "nat": nat, "gscode": if rsusp { 0 } else { 1 },
             "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
@@ -329,8 +330,9 @@ fn dx_native_market(gmid: i64, lean: &Value, sno: i64, iplay: bool, event_susp: 
         }));
         srno += 1;
     }
+    let mid = lean.get("mid").and_then(|v| v.as_i64()).unwrap_or(0);
     json!({
-        "gmid": gmid, "mid": 0, "pmid": Value::Null, "mname": mname, "rem": "",
+        "gmid": gmid, "mid": mid, "pmid": Value::Null, "mname": mname, "rem": "",
         "gtype": gtype, "status": if msusp { "SUSPENDED" } else { "OPEN" },
         "rc": sections.len(), "visible": false, "pid": 0,
         "gscode": if msusp { 0 } else { 1 }, "maxb": 1, "sno": sno, "dtype": 0,
