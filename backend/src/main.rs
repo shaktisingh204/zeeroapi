@@ -1,3 +1,6 @@
+// Raised for the deeply-nested `json!` example payloads in routes::v1 (OpenAPI).
+#![recursion_limit = "256"]
+
 mod analytics;
 mod api_keys;
 mod auth;

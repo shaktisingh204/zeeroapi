@@ -189,7 +189,7 @@ const ENDPOINTS: Endpoint[] = [
     display: "/v1/{provider}/matches",
     template: "/{provider}/matches?status=live&limit=20",
     summary:
-      "List matches and events (prematch + live), live first. Supports filtering and pagination. On exchange providers every row also embeds its full odds (back/lay/volume) and lock status.",
+      "List matches and events (prematch + live), live first. Supports filtering and pagination. Exchange providers (d247) instead return the native t1/t2 envelope (open / suspended) with Match Odds sections.",
     capability: "matches",
     params: [
       { name: "provider", loc: "path", required: true, desc: "Provider slug." },
@@ -202,29 +202,61 @@ const ENDPOINTS: Endpoint[] = [
     ],
     response: (slug, exch) =>
       exch
-        ? `[
-  {
-    "id": 884213,
-    "provider": "${slug}",
-    "sport_name": "Cricket",
-    "league_name": "Indian Premier League",
-    "home_team": "Mumbai Indians",
-    "away_team": "Chennai Super Kings",
-    "status": "live",
-    "match_time": "MI 142/3 (15.3)",
-    "suspended": false,
-    "featured": true,
-    "updated_at": "2026-06-09T14:00:00Z",
-    "odds": ${oddsEx(slug, true).replace(/\n/g, "\n    ")}
-  }
-]`
+        ? `{
+  "success": true,
+  "message": "Success",
+  "data": {
+    "t1": [
+      {
+        "gmid": 884213,
+        "ename": "Mumbai Indians v Chennai Super Kings",
+        "etid": 4, "cid": 2542291, "cname": "Indian Premier League",
+        "iplay": true, "stime": "6/10/2026 7:30:00 PM",
+        "tv": false, "bm": false, "f": true, "f1": false, "iscc": 0,
+        "mid": 0, "mname": "MATCH_ODDS", "status": "OPEN",
+        "rc": 2, "gscode": 1, "m": 0, "oid": 1, "gtype": "match",
+        "section": [
+          { "sid": 0, "sno": 1, "gstatus": "ACTIVE", "gscode": 1, "nat": "Mumbai Indians",
+            "odds": [
+              { "odds": 1.85, "oname": "back1", "otype": "back", "sid": 0, "tno": 0, "size": 240310.00 },
+              { "odds": 1.87, "oname": "lay1", "otype": "lay", "sid": 0, "tno": 0, "size": 240310.00 }
+            ] },
+          { "sid": 0, "sno": 3, "gstatus": "ACTIVE", "gscode": 1, "nat": "Chennai Super Kings",
+            "odds": [
+              { "odds": 2.12, "oname": "back1", "otype": "back", "sid": 0, "tno": 0, "size": 198450.00 },
+              { "odds": 2.16, "oname": "lay1", "otype": "lay", "sid": 0, "tno": 0, "size": 198450.00 }
+            ] }
+        ]
+      }
+    ],
+    "t2": [
+      {
+        "gmid": 884999,
+        "ename": "RCB (e) - Gujarat Titans (e)",
+        "etid": 4, "cid": 0, "cname": "Dim Cricket League (1 over)",
+        "iplay": true, "stime": "6/10/2026 9:42:00 AM",
+        "tv": true, "bm": false, "f": false, "f1": false, "iscc": 4,
+        "mid": 0, "mname": "MATCH_ODDS", "status": "SUSPENDED",
+        "rc": 2, "gscode": 0, "m": 0, "oid": 1, "gtype": "match",
+        "section": [
+          { "sid": 0, "sno": 1, "gstatus": "SUSPENDED", "gscode": 0, "nat": "RCB",
+            "odds": [
+              { "odds": 0, "oname": "BACK1", "otype": "BACK", "sid": 0, "tno": 0, "size": 0 },
+              { "odds": 0, "oname": "LAY1", "otype": "LAY", "sid": 0, "tno": 0, "size": 0 }
+            ] }
+        ]
+      }
+    ]
+  },
+  "apiInfo": { "provider": "ZeroApi", "website": "https://zeroapi.io" }
+}`
         : matchListEx(slug, false),
   },
   {
     id: "ep-match",
     display: "/v1/{provider}/matches/{id}",
     template: "/{provider}/matches/{id}",
-    summary: "Full detail for one match or event, including every market/odd. Also available as /v1/{provider}/matchdetails/{id}.",
+    summary: "Full detail for one match or event, including every market/odd. Also available as /v1/{provider}/matchdetails/{id}. Exchange providers (d247) instead use /v1/{provider}/matchdetails?gmid=ID&sportsid=N and return markets keyed by gmid.",
     capability: "matches",
     params: [
       { name: "provider", loc: "path", required: true, desc: "Provider slug." },
@@ -233,14 +265,37 @@ const ENDPOINTS: Endpoint[] = [
     response: (slug, exch) =>
       exch
         ? `{
-  "id": 884213,
-  "home_team": "Mumbai Indians",
-  "away_team": "Chennai Super Kings",
-  "status": "live",
-  "match_time": "MI 142/3 (15.3)",
-  "suspended": false,
-  "featured": true,
-  "odds": ${oddsEx(slug, true).replace(/\n/g, "\n  ")}
+  "success": true,
+  "message": "Success",
+  "data": {
+    "odds": {
+      "884213": [
+        {
+          "gmid": 884213, "mid": 0, "pmid": null, "mname": "MATCH_ODDS", "rem": "",
+          "gtype": "match", "status": "OPEN", "rc": 2, "visible": false, "pid": 0,
+          "gscode": 1, "maxb": 1, "sno": 1, "dtype": 0, "ocnt": 4, "m": 0, "max": 0,
+          "min": 0, "biplay": true, "umaxbof": 0, "boplay": true, "iplay": true,
+          "btcnt": 0, "company": null,
+          "section": [
+            { "sid": 0, "psid": 0, "sno": 1, "psrno": 1, "gstatus": "ACTIVE", "nat": "Mumbai Indians",
+              "gscode": 1, "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
+              "odds": [
+                { "psid": 0, "odds": 1.85, "otype": "back", "oname": "back1", "tno": 0, "size": 240310.00 },
+                { "psid": 0, "odds": 1.87, "otype": "lay", "oname": "lay1", "tno": 0, "size": 240310.00 }
+              ] },
+            { "sid": 0, "psid": 0, "sno": 2, "psrno": 2, "gstatus": "ACTIVE", "nat": "Chennai Super Kings",
+              "gscode": 1, "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
+              "odds": [
+                { "psid": 0, "odds": 2.12, "otype": "back", "oname": "back1", "tno": 0, "size": 198450.00 },
+                { "psid": 0, "odds": 2.16, "otype": "lay", "oname": "lay1", "tno": 0, "size": 198450.00 }
+              ] }
+          ]
+        }
+      ]
+    },
+    "missing_gmids": []
+  },
+  "apiInfo": { "provider": "ZeroApi", "website": "https://zeroapi.io" }
 }`
         : `{
   "id": 887542438404651,

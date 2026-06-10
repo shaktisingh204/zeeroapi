@@ -217,19 +217,126 @@ pub(crate) async fn matches_core(state: &AppState, client: &ApiClient, provider:
         .await?;
     Ok((rate_headers(client), Json(rows)))
 }
-// ---- matches (list) WITH embedded odds — exchange (d247/diamondexch) shape.
-// An exchange match row is meaningless without its prices, so every row carries
-// the full odds set the scraper captured: back `value`, `lay`, matched `volume`
-// and the per-runner `suspended` flag, alongside the match-level lock status.
-pub(crate) async fn matches_with_odds_core(state: &AppState, client: &ApiClient, provider: &str, q: ListQuery)
-    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+// ---- matches (list) in the d247 NATIVE shape (exchange: diamondexch) ----
+// d247's own feed returns matches split into `t1` (open) and `t2` (suspended),
+// each event carrying its Match Odds runners as `section[]` with back/lay prices
+// and matched size. We reproduce that exact envelope from our stored matches +
+// odds so consumers can treat /api/v1/diamondexch/matches like the source feed.
+// Native-only ids we don't scrape (sid, mid, tno, …) default to 0/false.
+
+fn d247_etid(sport: &str) -> i64 {
+    let s = sport.to_lowercase();
+    if s.contains("cricket") {
+        4
+    } else if s.contains("table") && s.contains("tennis") {
+        8
+    } else if s.contains("tennis") {
+        2
+    } else if s.contains("soccer") || s.contains("football") {
+        1
+    } else {
+        0
+    }
+}
+
+fn dec_f64(d: Option<rust_decimal::Decimal>) -> f64 {
+    use rust_decimal::prelude::ToPrimitive;
+    d.and_then(|v| v.to_f64()).unwrap_or(0.0)
+}
+
+// One runner (selection) in the native `section[]` shape: a back + a lay entry.
+fn d247_section(sno: i64, nat: &str, back: f64, lay: f64, size: f64, suspended: bool) -> Value {
+    // Native casing: ACTIVE rows use lowercase oname/otype, SUSPENDED uppercase.
+    let (b1, bt, l1, lt) = if suspended {
+        ("BACK1", "BACK", "LAY1", "LAY")
+    } else {
+        ("back1", "back", "lay1", "lay")
+    };
+    json!({
+        "sid": 0, "sno": sno,
+        "gstatus": if suspended { "SUSPENDED" } else { "ACTIVE" },
+        "gscode": if suspended { 0 } else { 1 },
+        "nat": nat,
+        "odds": [
+            { "odds": back, "oname": b1, "otype": bt, "sid": 0, "tno": 0, "size": size },
+            { "odds": lay,  "oname": l1, "otype": lt, "sid": 0, "tno": 0, "size": size }
+        ]
+    })
+}
+
+fn d247_event(m: &MatchView, mo: &[Odd], suspended: bool) -> Value {
+    let ename = if m.away_team.trim().is_empty() {
+        m.home_team.clone()
+    } else {
+        format!("{} v {}", m.home_team, m.away_team)
+    };
+    // Start time: prefer the parsed timestamp, else the captured display string.
+    let stime = m
+        .start_time
+        .map(|t| t.format("%-m/%-d/%Y %-I:%M:%S %p").to_string())
+        .or_else(|| m.match_time.clone())
+        .unwrap_or_default();
+
+    let mut sections = Vec::new();
+    if mo.is_empty() {
+        // No captured Match Odds rows (e.g. a freshly-locked event) — still emit
+        // the two-runner shell d247 shows, with names if we have them.
+        for (i, sno) in [1_i64, 3].iter().enumerate() {
+            let nat = if i == 0 { m.home_team.as_str() } else { m.away_team.as_str() };
+            sections.push(d247_section(*sno, nat, 0.0, 0.0, 0.0, true));
+        }
+    } else {
+        let mut sno = 1_i64;
+        for o in mo {
+            let s_susp = suspended || o.suspended;
+            sections.push(d247_section(
+                sno,
+                &o.outcome,
+                dec_f64(Some(o.value)),
+                dec_f64(o.lay),
+                dec_f64(o.volume),
+                s_susp,
+            ));
+            sno += 2; // native numbers runners 1, 3, 5, …
+        }
+    }
+
+    json!({
+        "gmid": m.id,
+        "ename": ename,
+        "etid": d247_etid(&m.sport_name),
+        "cid": m.league_id.unwrap_or(0),
+        "cname": m.league_name.clone().unwrap_or_default(),
+        "iplay": m.status == "live",
+        "stime": stime,
+        "tv": false, "bm": false, "f": m.featured, "f1": false, "iscc": 0,
+        "mid": 0, "mname": "MATCH_ODDS",
+        "status": if suspended { "SUSPENDED" } else { "OPEN" },
+        "rc": sections.len(),
+        "gscode": if suspended { 0 } else { 1 },
+        "m": 0, "oid": 1, "gtype": "match",
+        "section": sections
+    })
+}
+
+pub(crate) async fn matches_d247_core(state: &AppState, client: &ApiClient, provider: &str, mut q: ListQuery)
+    -> AppResult<(HeaderMap, Json<Value>)> {
+    // The native feed returns the full board; default to a large page here.
+    if q.limit.is_none() {
+        q.limit = Some(500);
+    }
     let (headers, Json(rows)) = matches_core(state, client, provider, q).await?;
     let ids: Vec<i64> = rows.iter().map(|m| m.id).collect();
+    // Only the Match Odds market feeds the section runners (the native list shows
+    // mname=MATCH_ODDS). Other markets remain available via /matchdetails.
     let odds: Vec<Odd> = if ids.is_empty() {
         Vec::new()
     } else {
         sqlx::query_as(
-            "SELECT * FROM odds WHERE match_id = ANY($1) ORDER BY match_id, market, outcome",
+            "SELECT * FROM odds
+             WHERE match_id = ANY($1)
+               AND lower(replace(market, '_', ' ')) IN ('match odds', 'matchodds')
+             ORDER BY match_id, id",
         )
         .bind(&ids)
         .fetch_all(&state.pool)
@@ -239,16 +346,155 @@ pub(crate) async fn matches_with_odds_core(state: &AppState, client: &ApiClient,
     for o in odds {
         by_match.entry(o.match_id).or_default().push(o);
     }
-    let out: Vec<Value> = rows
-        .into_iter()
-        .map(|m| {
-            let match_odds = by_match.remove(&m.id).unwrap_or_default();
-            let mut v = serde_json::to_value(&m).unwrap_or_else(|_| json!({}));
-            v["odds"] = serde_json::to_value(match_odds).unwrap_or_else(|_| json!([]));
-            v
-        })
-        .collect();
-    Ok((headers, Json(out)))
+
+    let (mut t1, mut t2) = (Vec::new(), Vec::new());
+    for m in &rows {
+        let suspended = m.suspended || m.status == "suspended";
+        let mo = by_match.get(&m.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        let event = d247_event(m, mo, suspended);
+        if suspended {
+            t2.push(event);
+        } else {
+            t1.push(event);
+        }
+    }
+
+    let body = json!({
+        "success": true,
+        "message": "Success",
+        "data": { "t1": t1, "t2": t2 },
+        "apiInfo": {
+            "provider": "ZeroApi",
+            "website": "https://zeroapi.io",
+            "message": "Real-time exchange data served by ZeroApi. t1 = open markets, t2 = suspended."
+        }
+    });
+    Ok((headers, Json(body)))
+}
+// ---- match detail in the d247 NATIVE shape (exchange: diamondexch) ----
+// Native d247 returns markets keyed by gmid: { data: { odds: { "<gmid>": [ market,
+// … ] }, missing_gmids: [] } }. Each market has section[] runners, each runner an
+// odds[] of price levels (back1/lay1 …). Called as ?gmid=ID&sportsid=N (gmid may
+// be comma-separated for a batch). We rebuild this from our stored matches+odds;
+// we only hold the best (level-1) back/lay, so each runner emits back1 + lay1.
+
+/// Parse a `gmid` query value: a single id or a comma-separated list.
+pub(crate) fn parse_gmids(raw: Option<&str>) -> Vec<i64> {
+    raw.map(|s| s.split(',').filter_map(|p| p.trim().parse::<i64>().ok()).collect())
+        .unwrap_or_default()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DetailQuery {
+    pub gmid: Option<String>,
+    // d247 routes by sport; accepted for parity but not required (the gmid is
+    // globally unique in our store). Unused beyond being allowed in the query.
+    #[allow(dead_code)]
+    pub sportsid: Option<i64>,
+}
+
+fn d247_market_names(market: &str) -> (String, String) {
+    let l = market.to_lowercase();
+    if l == "match odds" || l == "match_odds" || l == "matchodds" {
+        ("MATCH_ODDS".into(), "match".into())
+    } else if l.contains("fancy") || l.contains("session") {
+        (market.to_string(), "fancy1".into())
+    } else {
+        (market.to_string(), "match".into())
+    }
+}
+
+fn d247_market(gmid: i64, market: &str, rows: &[&Odd], live: bool, sno: i64) -> Value {
+    let (mname, gtype) = d247_market_names(market);
+    let mut sections = Vec::new();
+    let mut ocnt = 0usize;
+    let mut all_susp = true;
+    let mut srno = 1i64;
+    for o in rows {
+        let s_susp = o.suspended;
+        all_susp = all_susp && s_susp;
+        let size = dec_f64(o.volume);
+        let odds = vec![
+            json!({ "psid": 0, "odds": dec_f64(Some(o.value)), "otype": "back", "oname": "back1", "tno": 0, "size": size }),
+            json!({ "psid": 0, "odds": dec_f64(o.lay), "otype": "lay", "oname": "lay1", "tno": 0, "size": size }),
+        ];
+        ocnt += odds.len();
+        sections.push(json!({
+            "sid": 0, "psid": 0, "sno": srno, "psrno": srno,
+            "gstatus": if s_susp { "SUSPENDED" } else { "ACTIVE" },
+            "nat": o.outcome, "gscode": if s_susp { 0 } else { 1 },
+            "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
+            "odds": odds
+        }));
+        srno += 1;
+    }
+    let susp = !rows.is_empty() && all_susp;
+    json!({
+        "gmid": gmid, "mid": 0, "pmid": Value::Null, "mname": mname, "rem": "",
+        "gtype": gtype, "status": if susp { "SUSPENDED" } else { "OPEN" },
+        "rc": sections.len(), "visible": false, "pid": 0,
+        "gscode": if susp { 0 } else { 1 }, "maxb": 1, "sno": sno, "dtype": 0,
+        "ocnt": ocnt, "m": 0, "max": 0, "min": 0, "biplay": true, "umaxbof": 0,
+        "boplay": true, "iplay": live, "btcnt": 0, "company": Value::Null,
+        "section": sections
+    })
+}
+
+pub(crate) async fn match_detail_d247_core(state: &AppState, client: &ApiClient, provider: &str, gmids: Vec<i64>)
+    -> AppResult<(HeaderMap, Json<Value>)> {
+    require_capability(state, provider, "matches").await?;
+    if gmids.is_empty() {
+        return Err(AppError::BadRequest(
+            "matchdetails requires ?gmid=ID (optionally comma-separated), e.g. ?gmid=675117525&sportsid=4".into(),
+        ));
+    }
+    let mut odds_obj = serde_json::Map::new();
+    let mut missing: Vec<i64> = Vec::new();
+    for id in gmids {
+        let sql = format!("{MATCH_SELECT} WHERE m.provider = $1 AND m.id = $2 AND m.dead = false");
+        let m: Option<MatchView> = sqlx::query_as(&sql)
+            .bind(provider)
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?;
+        let Some(m) = m else {
+            missing.push(id);
+            continue;
+        };
+        let odds: Vec<Odd> = sqlx::query_as("SELECT * FROM odds WHERE match_id = $1 ORDER BY market, id")
+            .bind(id)
+            .fetch_all(&state.pool)
+            .await?;
+        // Group odds by market, preserving first-seen order.
+        let mut order: Vec<String> = Vec::new();
+        let mut groups: std::collections::HashMap<String, Vec<&Odd>> = std::collections::HashMap::new();
+        for o in &odds {
+            if !groups.contains_key(&o.market) {
+                order.push(o.market.clone());
+            }
+            groups.entry(o.market.clone()).or_default().push(o);
+        }
+        let live = m.status == "live";
+        let mut markets = Vec::new();
+        let mut sno = 1i64;
+        for mk in &order {
+            let rows = groups.get(mk).map(|v| v.as_slice()).unwrap_or_default();
+            markets.push(d247_market(id, mk, rows, live, sno));
+            sno += 1;
+        }
+        odds_obj.insert(id.to_string(), Value::Array(markets));
+    }
+    let body = json!({
+        "success": true,
+        "message": "Success",
+        "data": { "odds": Value::Object(odds_obj), "missing_gmids": missing },
+        "apiInfo": {
+            "provider": "ZeroApi",
+            "website": "https://zeroapi.io",
+            "message": "Markets keyed by gmid. data.odds[gmid] = markets, each with section[] runners and back/lay levels."
+        }
+    });
+    Ok((rate_headers(client), Json(body)))
 }
 // ---- match detail ----
 pub(crate) async fn match_detail_core(state: &AppState, client: &ApiClient, provider: &str, id: i64)
@@ -480,34 +726,97 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
         // endpoint. /matches embeds each row's full odds + lock status, and
         // /matchdetails/:id returns the same for one match.
         if is_exchange {
-            // /matches rows carry everything the scraper captured: odds with
-            // back/lay/volume, per-runner suspended, and the match-level lock.
-            let exch_matches_with_odds_ex = json!([{
-                "id": exch_match_ex[0]["id"], "provider": exch_match_ex[0]["provider"],
-                "sport_name": exch_match_ex[0]["sport_name"], "league_name": exch_match_ex[0]["league_name"],
-                "home_team": exch_match_ex[0]["home_team"], "away_team": exch_match_ex[0]["away_team"],
-                "status": "live", "match_time": exch_match_ex[0]["match_time"],
-                "suspended": false, "updated_at": exch_match_ex[0]["updated_at"],
-                "odds": exch_odds_ex
-            }]);
+            // /matches returns the d247 NATIVE envelope: data.t1 (open) + data.t2
+            // (suspended), each event carrying its Match Odds section[] runners
+            // with back/lay/size.
+            let d247_native_ex = json!({
+                "success": true,
+                "message": "Success",
+                "data": {
+                    "t1": [{
+                        "gmid": 884213, "ename": "Mumbai Indians v Chennai Super Kings",
+                        "etid": 4, "cid": 2542291, "cname": "Indian Premier League",
+                        "iplay": true, "stime": "6/10/2026 7:30:00 PM",
+                        "tv": false, "bm": false, "f": true, "f1": false, "iscc": 0,
+                        "mid": 0, "mname": "MATCH_ODDS", "status": "OPEN",
+                        "rc": 2, "gscode": 1, "m": 0, "oid": 1, "gtype": "match",
+                        "section": [
+                            {"sid": 0, "sno": 1, "gstatus": "ACTIVE", "gscode": 1, "nat": "Mumbai Indians",
+                             "odds": [{"odds": 1.85, "oname": "back1", "otype": "back", "sid": 0, "tno": 0, "size": 240310.0},
+                                      {"odds": 1.87, "oname": "lay1", "otype": "lay", "sid": 0, "tno": 0, "size": 240310.0}]},
+                            {"sid": 0, "sno": 3, "gstatus": "ACTIVE", "gscode": 1, "nat": "Chennai Super Kings",
+                             "odds": [{"odds": 2.12, "oname": "back1", "otype": "back", "sid": 0, "tno": 0, "size": 198450.0},
+                                      {"odds": 2.16, "oname": "lay1", "otype": "lay", "sid": 0, "tno": 0, "size": 198450.0}]}
+                        ]
+                    }],
+                    "t2": [{
+                        "gmid": 884999, "ename": "Royal Challengers Bengaluru (e) - Gujarat Titans (e)",
+                        "etid": 4, "cid": 0, "cname": "Dim Cricket League (1 over)",
+                        "iplay": true, "stime": "6/10/2026 9:42:00 AM",
+                        "tv": true, "bm": false, "f": false, "f1": false, "iscc": 4,
+                        "mid": 0, "mname": "MATCH_ODDS", "status": "SUSPENDED",
+                        "rc": 2, "gscode": 0, "m": 0, "oid": 1, "gtype": "match",
+                        "section": [
+                            {"sid": 0, "sno": 1, "gstatus": "SUSPENDED", "gscode": 0, "nat": "Royal Challengers Bengaluru",
+                             "odds": [{"odds": 0, "oname": "BACK1", "otype": "BACK", "sid": 0, "tno": 0, "size": 0},
+                                      {"odds": 0, "oname": "LAY1", "otype": "LAY", "sid": 0, "tno": 0, "size": 0}]},
+                            {"sid": 0, "sno": 3, "gstatus": "SUSPENDED", "gscode": 0, "nat": "Gujarat Titans",
+                             "odds": [{"odds": 0, "oname": "BACK1", "otype": "BACK", "sid": 0, "tno": 0, "size": 0},
+                                      {"odds": 0, "oname": "LAY1", "otype": "LAY", "sid": 0, "tno": 0, "size": 0}]}
+                        ]
+                    }]
+                },
+                "apiInfo": {"provider": "ZeroApi", "website": "https://zeroapi.io",
+                    "message": "t1 = open markets, t2 = suspended."}
+            });
             paths.insert(format!("/{pv}/sports"), json!({"get": {"tags":[tag.clone()],
                 "summary": format!("{} — sports + ids", p.name),
                 "responses": {"200": resp("Sports list", &sport_ex)}}}));
             paths.insert(format!("/{pv}/matches"), json!({"get": {"tags":[tag.clone()],
-                "summary": format!("{} — matches with embedded odds (back/lay/volume) + lock status", p.name),
+                "summary": format!("{} — matches in native t1/t2 envelope (open / suspended) with Match Odds sections", p.name),
                 "parameters":[
                     {"name":"sport_id","in":"query","schema":{"type":"integer"}},
                     {"name":"status","in":"query","schema":{"type":"string","enum":["live","prematch","finished"]}},
-                    {"name":"limit","in":"query","schema":{"type":"integer","default":50}},
+                    {"name":"limit","in":"query","schema":{"type":"integer","default":500}},
                     {"name":"offset","in":"query","schema":{"type":"integer","default":0}}],
-                "responses": {"200": resp("Matches, each with its full odds set and suspended flags", &exch_matches_with_odds_ex)}}}));
+                "responses": {"200": resp("Open (t1) + suspended (t2) matches with back/lay sections", &d247_native_ex)}}}));
+            let d247_detail_ex = json!({
+                "success": true, "message": "Success",
+                "data": {
+                    "odds": {
+                        "884213": [{
+                            "gmid": 884213, "mid": 0, "pmid": null, "mname": "MATCH_ODDS", "rem": "",
+                            "gtype": "match", "status": "OPEN", "rc": 2, "visible": false, "pid": 0,
+                            "gscode": 1, "maxb": 1, "sno": 1, "dtype": 0, "ocnt": 4, "m": 0, "max": 0,
+                            "min": 0, "biplay": true, "umaxbof": 0, "boplay": true, "iplay": true,
+                            "btcnt": 0, "company": null,
+                            "section": [
+                                {"sid": 0, "psid": 0, "sno": 1, "psrno": 1, "gstatus": "ACTIVE", "nat": "Mumbai Indians",
+                                 "gscode": 1, "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
+                                 "odds": [{"psid": 0, "odds": 1.85, "otype": "back", "oname": "back1", "tno": 0, "size": 240310.0},
+                                          {"psid": 0, "odds": 1.87, "otype": "lay", "oname": "lay1", "tno": 0, "size": 240310.0}]},
+                                {"sid": 0, "psid": 0, "sno": 2, "psrno": 2, "gstatus": "ACTIVE", "nat": "Chennai Super Kings",
+                                 "gscode": 1, "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
+                                 "odds": [{"psid": 0, "odds": 2.12, "otype": "back", "oname": "back1", "tno": 0, "size": 198450.0},
+                                          {"psid": 0, "odds": 2.16, "otype": "lay", "oname": "lay1", "tno": 0, "size": 198450.0}]}
+                            ]
+                        }]
+                    },
+                    "missing_gmids": []
+                },
+                "apiInfo": {"provider": "ZeroApi", "website": "https://zeroapi.io"}
+            });
+            paths.insert(format!("/{pv}/matchdetails"), json!({"get": {"tags":[tag.clone()],
+                "summary": format!("{} — native match detail by gmid (markets + sections + back/lay)", p.name),
+                "parameters":[
+                    {"name":"gmid","in":"query","required":true,"schema":{"type":"string"},
+                     "description":"Match gmid; comma-separate for a batch, e.g. 884213 or 884213,884999"},
+                    {"name":"sportsid","in":"query","schema":{"type":"integer"},"description":"Sport id (etid), e.g. 4 = cricket"}],
+                "responses": {"200": resp("Markets keyed by gmid, with missing_gmids", &d247_detail_ex)}}}));
             paths.insert(format!("/{pv}/matchdetails/{{id}}"), json!({"get": {"tags":[tag.clone()],
-                "summary": format!("{} — match detail + all odds (back/lay/volume/suspended)", p.name),
+                "summary": format!("{} — native match detail (path form of ?gmid=)", p.name),
                 "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],
-                "responses": {"200": resp("Match with odds",
-                    &json!({"id":m_ex[0]["id"],"home_team":m_ex[0]["home_team"],"away_team":m_ex[0]["away_team"],
-                        "status":"live","suspended":false,"odds":o_ex})),
-                    "404": {"description":"Not found"}}}}));
+                "responses": {"200": resp("Markets keyed by gmid", &d247_detail_ex)}}}));
             paths.insert(format!("/{pv}/leagues"), json!({"get": {"tags":[tag.clone()],
                 "summary": format!("{} — leagues", p.name),
                 "parameters":[{"name":"sport_id","in":"query","schema":{"type":"integer"}}],

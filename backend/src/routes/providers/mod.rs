@@ -57,19 +57,29 @@ pub(crate) fn build_exchange(slug: &'static str) -> Router<AppState> {
             "/sports",
             get(move |State(s): State<AppState>, c: ApiClient| async move { v1::sports_core(&s, &c, slug).await }),
         )
-        // Exchange /matches embeds EVERYTHING the scraper captured per match:
-        // full odds (back/lay/volume), per-runner suspended and the match-level
-        // lock status — no second call to /matchdetails needed for a list view.
+        // Exchange /matches returns the d247 NATIVE envelope: { success, message,
+        // data: { t1 (open), t2 (suspended) }, apiInfo }, each event carrying its
+        // Match Odds runners as section[] with back/lay/size — no second call to
+        // /matchdetails needed for a list view.
         .route(
             "/matches",
             get(move |State(s): State<AppState>, c: ApiClient, Query(q): Query<v1::ListQuery>| async move {
-                v1::matches_with_odds_core(&s, &c, slug, q).await
+                v1::matches_d247_core(&s, &c, slug, q).await
             }),
         )
+        // Native matchdetails: ?gmid=ID&sportsid=N (gmid may be comma-separated).
+        // Returns { data: { odds: { "<gmid>": [markets…] }, missing_gmids } }.
+        .route(
+            "/matchdetails",
+            get(move |State(s): State<AppState>, c: ApiClient, Query(q): Query<v1::DetailQuery>| async move {
+                v1::match_detail_d247_core(&s, &c, slug, v1::parse_gmids(q.gmid.as_deref())).await
+            }),
+        )
+        // Path form kept for convenience: /matchdetails/{gmid} → same native shape.
         .route(
             "/matchdetails/:id",
             get(move |State(s): State<AppState>, c: ApiClient, Path(id): Path<i64>| async move {
-                v1::match_detail_core(&s, &c, slug, id).await
+                v1::match_detail_d247_core(&s, &c, slug, vec![id]).await
             }),
         )
         .route(

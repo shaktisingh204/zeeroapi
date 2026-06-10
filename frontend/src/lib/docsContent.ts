@@ -396,10 +396,10 @@ const SEEDS: Seed[] = [
     about: [
       "Diamond Exch (d247) is the one exchange on the platform, and its data shape is fundamentally different from every sportsbook here. Each runner quotes a back price, a lay price and the matched volume behind it, and whole markets lock (suspend) the moment a ball is bowled or a goal goes in.",
       "Coverage is cricket-first — Match Odds, Bookmaker and Fancy (session) markets on every televised game — with football and tennis exchanges alongside. The site is a heavily protected SPA, so the feed is produced by Playwright rendering the real app and reading its DOM.",
-      "The endpoint surface is deliberately small: six endpoints, and there is no separate odds endpoint, because on an exchange the prices are meaningless without the suspension state that travels with the match. Instead, /matches embeds every row's full odds — back, lay, volume and suspended — and /matchdetails/{id} returns the same for one match.",
+      "The endpoint surface is deliberately small: six endpoints, and there is no separate odds endpoint, because on an exchange the prices are meaningless without the suspension state that travels with the match. Instead, /matches returns the d247 native envelope — data.t1 (open) and data.t2 (suspended), each event carrying its Match Odds runners as section[] with back/lay/size — and /matchdetails?gmid=ID returns the full market tree (markets keyed by gmid) for one or more matches.",
     ],
     quirks: [
-      "/matches pushes everything the scraper captured: each row embeds its odds (back/lay/volume) and lock status, so a list view needs no follow-up calls. There is no /odds or /markets endpoint on this provider.",
+      "/matches mirrors the d247 native feed: { success, message, data: { t1, t2 }, apiInfo }. t1 = open matches, t2 = suspended matches; each event's section[] holds the Match Odds runners (back + lay + size). There is no /odds or /markets endpoint on this provider — deeper markets come from /matchdetails.",
       "Bookmaker and Fancy prices are quoted in exchange ticks (e.g. 78/82), not decimal odds — divide by 100 and add 1 to convert.",
       "Fancy markets are cricket session lines: the outcome is the line description, value/lay are the run brackets.",
       "suspended flips constantly in-play; always render it, never cache through it.",
@@ -446,6 +446,126 @@ function matchRow(s: Seed, status: string, indent = "  "): string {
   return `${indent}{\n${matchFields(s, status, indent)}\n${indent}}`;
 }
 
+// d247 native matches envelope: data.t1 (open) + data.t2 (suspended), each event
+// carrying its Match Odds runners as section[] with back/lay/size.
+function exchangeMatchesEnvelope(s: Seed): string {
+  const etid = s.sport.id;
+  return `{
+  "success": true,
+  "message": "Success",
+  "data": {
+    "t1": [
+      {
+        "gmid": ${s.matchId},
+        "ename": "${s.home} v ${s.away}",
+        "etid": ${etid},
+        "cid": ${s.league.id},
+        "cname": "${s.league.name}",
+        "iplay": true,
+        "stime": "6/10/2026 7:30:00 PM",
+        "tv": false, "bm": false, "f": true, "f1": false, "iscc": 0,
+        "mid": 0, "mname": "MATCH_ODDS", "status": "OPEN",
+        "rc": 2, "gscode": 1, "m": 0, "oid": 1, "gtype": "match",
+        "section": [
+          { "sid": 0, "sno": 1, "gstatus": "ACTIVE", "gscode": 1, "nat": "${s.home}",
+            "odds": [
+              { "odds": 1.85, "oname": "back1", "otype": "back", "sid": 0, "tno": 0, "size": 240310.00 },
+              { "odds": 1.87, "oname": "lay1", "otype": "lay", "sid": 0, "tno": 0, "size": 240310.00 }
+            ] },
+          { "sid": 0, "sno": 3, "gstatus": "ACTIVE", "gscode": 1, "nat": "${s.away}",
+            "odds": [
+              { "odds": 2.12, "oname": "back1", "otype": "back", "sid": 0, "tno": 0, "size": 198450.00 },
+              { "odds": 2.16, "oname": "lay1", "otype": "lay", "sid": 0, "tno": 0, "size": 198450.00 }
+            ] }
+        ]
+      }
+    ],
+    "t2": [
+      {
+        "gmid": 726751034,
+        "ename": "Mumbai Indians (e) - Chennai Super Kings (e)",
+        "etid": ${etid},
+        "cid": 0,
+        "cname": "Dim Cricket League (1 over)",
+        "iplay": true,
+        "stime": "6/10/2026 9:45:00 AM",
+        "tv": true, "bm": false, "f": false, "f1": false, "iscc": 4,
+        "mid": 0, "mname": "MATCH_ODDS", "status": "SUSPENDED",
+        "rc": 2, "gscode": 0, "m": 0, "oid": 1, "gtype": "match",
+        "section": [
+          { "sid": 0, "sno": 1, "gstatus": "SUSPENDED", "gscode": 0, "nat": "Mumbai Indians",
+            "odds": [
+              { "odds": 0, "oname": "BACK1", "otype": "BACK", "sid": 0, "tno": 0, "size": 0 },
+              { "odds": 0, "oname": "LAY1", "otype": "LAY", "sid": 0, "tno": 0, "size": 0 }
+            ] },
+          { "sid": 0, "sno": 3, "gstatus": "SUSPENDED", "gscode": 0, "nat": "Chennai Super Kings",
+            "odds": [
+              { "odds": 0, "oname": "BACK1", "otype": "BACK", "sid": 0, "tno": 0, "size": 0 },
+              { "odds": 0, "oname": "LAY1", "otype": "LAY", "sid": 0, "tno": 0, "size": 0 }
+            ] }
+        ]
+      }
+    ]
+  },
+  "apiInfo": { "provider": "ZeroApi", "website": "https://zeroapi.io",
+    "message": "t1 = open markets, t2 = suspended." }
+}`;
+}
+
+// d247 native matchdetails: data.odds keyed by gmid → array of markets, each with
+// section[] runners and an odds[] of back/lay levels. Shows MATCH_ODDS + a Fancy.
+function exchangeMatchDetailEnvelope(s: Seed): string {
+  return `{
+  "success": true,
+  "message": "Success",
+  "data": {
+    "odds": {
+      "${s.matchId}": [
+        {
+          "gmid": ${s.matchId}, "mid": 0, "pmid": null, "mname": "MATCH_ODDS", "rem": "",
+          "gtype": "match", "status": "OPEN", "rc": 2, "visible": false, "pid": 0,
+          "gscode": 1, "maxb": 1, "sno": 1, "dtype": 0, "ocnt": 4, "m": 0, "max": 0,
+          "min": 0, "biplay": true, "umaxbof": 0, "boplay": true, "iplay": true,
+          "btcnt": 0, "company": null,
+          "section": [
+            { "sid": 0, "psid": 0, "sno": 1, "psrno": 1, "gstatus": "ACTIVE", "nat": "${s.home}",
+              "gscode": 1, "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
+              "odds": [
+                { "psid": 0, "odds": 1.85, "otype": "back", "oname": "back1", "tno": 0, "size": 240310.00 },
+                { "psid": 0, "odds": 1.87, "otype": "lay", "oname": "lay1", "tno": 0, "size": 240310.00 }
+              ] },
+            { "sid": 0, "psid": 0, "sno": 2, "psrno": 2, "gstatus": "ACTIVE", "nat": "${s.away}",
+              "gscode": 1, "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
+              "odds": [
+                { "psid": 0, "odds": 2.12, "otype": "back", "oname": "back1", "tno": 0, "size": 198450.00 },
+                { "psid": 0, "odds": 2.16, "otype": "lay", "oname": "lay1", "tno": 0, "size": 198450.00 }
+              ] }
+          ]
+        },
+        {
+          "gmid": ${s.matchId}, "mid": 0, "pmid": null, "mname": "Bookmaker", "rem": "",
+          "gtype": "match", "status": "SUSPENDED", "rc": 1, "visible": false, "pid": 0,
+          "gscode": 0, "maxb": 1, "sno": 2, "dtype": 0, "ocnt": 2, "m": 0, "max": 0,
+          "min": 0, "biplay": true, "umaxbof": 0, "boplay": true, "iplay": true,
+          "btcnt": 0, "company": null,
+          "section": [
+            { "sid": 0, "psid": 0, "sno": 1, "psrno": 1, "gstatus": "SUSPENDED", "nat": "${s.home}",
+              "gscode": 0, "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
+              "odds": [
+                { "psid": 0, "odds": 78, "otype": "back", "oname": "back1", "tno": 0, "size": 0 },
+                { "psid": 0, "odds": 82, "otype": "lay", "oname": "lay1", "tno": 0, "size": 0 }
+              ] }
+          ]
+        }
+      ]
+    },
+    "missing_gmids": []
+  },
+  "apiInfo": { "provider": "ZeroApi", "website": "https://zeroapi.io",
+    "message": "Markets keyed by gmid; each market has section[] runners with back/lay levels." }
+}`;
+}
+
 function buildEndpoints(s: Seed): DocEndpoint[] {
   const eps: DocEndpoint[] = [];
   const base = `/${s.slug}`;
@@ -482,7 +602,7 @@ function buildEndpoints(s: Seed): DocEndpoint[] {
     "matches",
     "/matches",
     s.kind === "exchange"
-      ? "Matches and events, live first — and on this exchange every row embeds everything the scraper captured: the full odds set (back, lay, volume) plus per-runner and match-level suspended flags. One call gives you a renderable list."
+      ? "Matches in the d247 NATIVE envelope: { success, message, data: { t1, t2 }, apiInfo }. t1 = open matches, t2 = suspended matches. Every event carries its Match Odds runners as section[] with back/lay prices and matched size — one call gives you a renderable board, no follow-up needed."
       : "Matches and events (prematch + live), live first. Filterable and paginated.",
     [
       P(s.slug),
@@ -490,33 +610,38 @@ function buildEndpoints(s: Seed): DocEndpoint[] {
       { name: "sport_id", loc: "query", desc: `Filter by sport id (e.g. ${s.sport.id} = ${s.sport.name}).` },
       { name: "league_id", loc: "query", desc: "Filter by league id." },
       { name: "search", loc: "query", desc: "Match home/away team name." },
-      { name: "limit", loc: "query", desc: "1–500, default 50." },
+      { name: "limit", loc: "query", desc: s.kind === "exchange" ? "1–500, default 500." : "1–500, default 50." },
       { name: "offset", loc: "query", desc: "Pagination offset." },
     ],
-    s.kind === "exchange"
-      ? `[
-  {
-${matchFields(s, "live", "  ")},
-    "odds": ${s.oddsRows.replace(/\n/g, "\n    ")}
-  }
-]`
-      : `[\n${matchRow(s, "live")}\n]`,
-    `/matches?status=live&sport_id=${s.sport.id}`,
+    s.kind === "exchange" ? exchangeMatchesEnvelope(s) : `[\n${matchRow(s, "live")}\n]`,
+    `/matches?sport_id=${s.sport.id}`,
   );
 
-  add(
-    "matchdetails",
-    "/matchdetails/{id}",
-    s.kind === "exchange"
-      ? "Full match detail plus every market — back, lay, volume and suspension per runner. The only place odds appear on this provider."
-      : "Full detail for one match including every captured odd. Also available as /matches/{id}.",
-    [P(s.slug), { name: "id", loc: "path", required: true, desc: `Match id, e.g. ${s.matchId}.` }],
-    `{
+  if (s.kind === "exchange") {
+    add(
+      "matchdetails",
+      "/matchdetails",
+      "Native match detail by gmid: data.odds is keyed by gmid → an array of markets, each with section[] runners and an odds[] of back/lay levels. Pass several gmids (comma-separated) to batch; any not found come back in missing_gmids. This is where the full market tree (Match Odds, Bookmaker, Fancy) lives.",
+      [
+        { name: "gmid", loc: "query", required: true, desc: `Match gmid; comma-separate to batch, e.g. ${s.matchId} or ${s.matchId},884999.` },
+        { name: "sportsid", loc: "query", desc: `Sport id (etid), e.g. ${s.sport.id} = ${s.sport.name}.` },
+      ],
+      exchangeMatchDetailEnvelope(s),
+      `/matchdetails?gmid=${s.matchId}&sportsid=${s.sport.id}`,
+    );
+  } else {
+    add(
+      "matchdetails",
+      "/matchdetails/{id}",
+      "Full detail for one match including every captured odd. Also available as /matches/{id}.",
+      [P(s.slug), { name: "id", loc: "path", required: true, desc: `Match id, e.g. ${s.matchId}.` }],
+      `{
 ${matchFields(s, "live", "")},
   "odds": ${s.oddsRows.replace(/\n/g, "\n  ")}
 }`,
-    `/matchdetails/${s.matchId}`,
-  );
+      `/matchdetails/${s.matchId}`,
+    );
+  }
 
   add(
     "leagues",
