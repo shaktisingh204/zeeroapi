@@ -198,11 +198,12 @@ async fn d247_snapshot(
         }
     }
 
-    // Retire events no longer present — SCOPED to the sports (etids) in THIS
-    // snapshot, like the shared snapshot's per-sport sweep. A per-sport pass only
-    // carries one sport's gmids, so an unscoped sweep would wipe every OTHER
-    // sport's events. Grace-aware: a match missing from this pass is only dropped
-    // once it has gone un-scraped for the grace window.
+    // Fresh-replacement sweep — SCOPED to the sports (etids) in THIS snapshot.
+    // Each scrape replaces a sport's set wholesale: any event of those etids NOT
+    // in this snapshot is DELETED (forgotten), so the API only ever serves the
+    // latest scrape — no stale rows linger. With sweep_grace_seconds > 0 the
+    // delete waits out the grace window instead (resilience mode); native posts
+    // send 0 for immediate replacement.
     if snap.sweep && !seen.is_empty() {
         let etids: Vec<i32> = {
             let mut s: std::collections::HashSet<i32> = std::collections::HashSet::new();
@@ -213,8 +214,8 @@ async fn d247_snapshot(
         };
         if snap.sweep_grace_seconds > 0 {
             sqlx::query(
-                "UPDATE diamondexch_events SET dead = true
-                 WHERE dead = false AND etid = ANY($1) AND gmid <> ALL($2)
+                "DELETE FROM diamondexch_events
+                 WHERE etid = ANY($1) AND gmid <> ALL($2)
                    AND updated_at < now() - make_interval(secs => $3)",
             )
             .bind(&etids)
@@ -224,8 +225,7 @@ async fn d247_snapshot(
             .await?;
         } else {
             sqlx::query(
-                "UPDATE diamondexch_events SET dead = true
-                 WHERE dead = false AND etid = ANY($1) AND gmid <> ALL($2)",
+                "DELETE FROM diamondexch_events WHERE etid = ANY($1) AND gmid <> ALL($2)",
             )
             .bind(&etids)
             .bind(&seen)

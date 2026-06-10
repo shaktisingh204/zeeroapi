@@ -439,10 +439,12 @@ async def collect_native_detail(page, gmid):
 
 
 async def post_d247_native(client, source, events, sweep=False):
-    """POST already-built native events (from capture) to /api/ingest/d247."""
+    """POST already-built native events (from capture) to /api/ingest/d247.
+    Grace is 0 → each scrape REPLACES the sport's set wholesale: stale rows are
+    deleted immediately so the API only ever serves the freshest scrape."""
     payload = {
         "source": source, "events": events, "sweep": sweep,
-        "sweep_grace_seconds": SWEEP_GRACE_SECONDS if sweep else 0,
+        "sweep_grace_seconds": 0,
     }
     try:
         r = await client.post(
