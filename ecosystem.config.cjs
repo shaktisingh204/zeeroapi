@@ -96,16 +96,16 @@ module.exports = {
   apps: [
     {
       ...common,
-      ...logs('backend'),
-      name: 'backend',
+      ...logs('zeroapi-backend'),
+      name: 'zeroapi-backend',
       cwd: BACKEND_DIR,
       // The Rust binary loads backend/.env itself (dotenvy) given cwd=backend.
       script: path.join(BACKEND_DIR, 'target', 'release', 'melbet-saas-backend'),
     },
     {
       ...common,
-      ...logs('frontend'),
-      name: 'frontend',
+      ...logs('zeroapi-frontend'),
+      name: 'zeroapi-frontend',
       cwd: FRONTEND_DIR,
       interpreter: 'node',
       script: NEXT_BIN,

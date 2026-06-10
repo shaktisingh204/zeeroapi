@@ -158,7 +158,7 @@ if [ "${DO_STOP:-0}" = 1 ]; then
   # PM2-managed apps (the default since this stack moved to PM2)
   if command -v pm2 >/dev/null 2>&1; then
     if pm2 delete "$REPO_ROOT/ecosystem.config.cjs" >/dev/null 2>&1; then
-      ok "stopped PM2 apps (backend, frontend, scrapers)"
+      ok "stopped PM2 apps (zeroapi-backend, zeroapi-frontend, scrapers)"
       pm2 save >/dev/null 2>&1 || true
     else
       warn "no PM2 apps from this stack were running"
@@ -439,21 +439,21 @@ ensure_pm2() {
 start_with_pm2() {
   # Pass ports + the real INGEST_KEY through so ecosystem.config.cjs picks them up.
   export BACKEND_PORT FRONTEND_PORT BACKEND_URL="http://localhost:${BACKEND_PORT}" INGEST_KEY
-  say "Starting stack under PM2 (web: backend,frontend$([ "$WITH_SCRAPERS" = 1 ] && echo "  scrapers: $SCRAPER_APPS"))"
+  say "Starting stack under PM2 (web: zeroapi-backend,zeroapi-frontend$([ "$WITH_SCRAPERS" = 1 ] && echo "  scrapers: $SCRAPER_APPS"))"
 
   # --- Web tier (binds the HTTP ports) ---
   # Only the port-binding apps need the delete → free-port → start dance: deleting
   # first stops PM2 respawning into the port while we free it (that race crash-looped).
-  pm2 delete backend frontend >/dev/null 2>&1 || true
+  pm2 delete zeroapi-backend zeroapi-frontend >/dev/null 2>&1 || true
   kill_legacy_nohup
   free_port "$BACKEND_PORT"
   free_port "$FRONTEND_PORT"
   # Guard the start: under `set -e` a non-zero exit here would abort the whole
   # script before we could show the cause. Capture it, show pm2's view, retry once.
-  if ! pm2 start "$ECOSYSTEM" --only "backend,frontend" --update-env; then
+  if ! pm2 start "$ECOSYSTEM" --only "zeroapi-backend,zeroapi-frontend" --update-env; then
     warn "pm2 start failed (output above) — freeing ports and retrying once"
     free_port "$BACKEND_PORT"; free_port "$FRONTEND_PORT"
-    pm2 start "$ECOSYSTEM" --only "backend,frontend" --update-env \
+    pm2 start "$ECOSYSTEM" --only "zeroapi-backend,zeroapi-frontend" --update-env \
       || die "pm2 could not start the stack. Inspect with: pm2 logs --lines 50"
   fi
 
@@ -469,7 +469,7 @@ start_with_pm2() {
   pm2 save >/dev/null 2>&1 || true
   pm2 status || true
   ok "pm2 apps online"
-  wait_health || warn "backend health check timed out — inspect with: pm2 logs backend"
+  wait_health || warn "backend health check timed out — inspect with: pm2 logs zeroapi-backend"
   [ "$WITH_SCRAPERS" != 1 ] && warn "scrapers not started — re-run with --with-scrapers (melbet runs via the backend)"
   if ! pm2 startup 2>/dev/null | grep -q "already"; then
     warn "to survive reboots run once:  pm2 startup   (then paste the command it prints)"
@@ -492,7 +492,7 @@ start_with_nohup() {
   if port_busy "$BACKEND_PORT"; then
     warn "port $BACKEND_PORT already in use — assuming backend is up"
   else
-    start_bg backend "$LOG_DIR/backend.log" "$BACKEND_DIR" "$BACKEND_DIR/target/release/melbet-saas-backend"
+    start_bg zeroapi-backend "$LOG_DIR/zeroapi-backend.log" "$BACKEND_DIR" "$BACKEND_DIR/target/release/melbet-saas-backend"
     wait_health || true
   fi
 
@@ -500,7 +500,7 @@ start_with_nohup() {
   if port_busy "$FRONTEND_PORT"; then
     warn "port $FRONTEND_PORT already in use — assuming frontend is up"
   else
-    start_bg frontend "$LOG_DIR/frontend.log" "$FRONTEND_DIR" npx next start -p "$FRONTEND_PORT"
+    start_bg zeroapi-frontend "$LOG_DIR/zeroapi-frontend.log" "$FRONTEND_DIR" npx next start -p "$FRONTEND_PORT"
   fi
 
   if [ "$WITH_SCRAPERS" = 1 ]; then
