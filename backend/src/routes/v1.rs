@@ -548,14 +548,32 @@ pub(crate) async fn featured_core(state: &AppState, client: &ApiClient, provider
 pub(crate) async fn header_matches_core(state: &AppState, client: &ApiClient, provider: &str)
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     require_capability(state, provider, "matches").await?;
+    // Prefer matches the scraper explicitly flagged as the provider's header
+    // strip.
     let sql = format!(
         "{MATCH_SELECT} WHERE m.provider = $1 AND m.dead = false AND m.header = true AND m.status <> 'finished'
          ORDER BY (m.status = 'live') DESC, m.start_time ASC NULLS LAST LIMIT 200"
     );
-    let rows: Vec<MatchView> = sqlx::query_as(&sql)
+    let mut rows: Vec<MatchView> = sqlx::query_as(&sql)
         .bind(provider)
         .fetch_all(&state.pool)
         .await?;
+
+    // Fallback: many providers don't expose a separable header ticker (so nothing
+    // gets flagged header=true). Rather than return an empty "latest event" strip,
+    // surface the latest events — live first, then the soonest-starting upcoming,
+    // then the freshest — so the strip always has data when matches exist.
+    if rows.is_empty() {
+        let fb = format!(
+            "{MATCH_SELECT} WHERE m.provider = $1 AND m.dead = false AND m.status <> 'finished'
+             ORDER BY (m.status = 'live') DESC, m.start_time ASC NULLS LAST, m.updated_at DESC
+             LIMIT 24"
+        );
+        rows = sqlx::query_as(&fb)
+            .bind(provider)
+            .fetch_all(&state.pool)
+            .await?;
+    }
     Ok((rate_headers(client), Json(rows)))
 }
 // ---- results (finished matches with derived winners) ----

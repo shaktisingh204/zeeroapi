@@ -675,7 +675,7 @@ ${matchFields(s, "live", "")},
     add(
       "headermatches",
       "/headermatches",
-      "Matches promoted in the d247 header strip — the events the exchange itself is pushing right now.",
+      "Matches promoted in the d247 header strip. When no separate header strip is detected, this falls back to the latest events (live first, then soonest upcoming) so the strip is never empty.",
       [P(s.slug)],
       `[\n${matchRow(s, "prematch")}\n]`,
     );
@@ -703,7 +703,7 @@ ${matchFields(s, "live", "")},
   add(
     "headermatches",
     "/headermatches",
-    "Matches shown in the provider's header ticker (distinct from the main list).",
+    "Matches shown in the provider's header ticker (distinct from the main list). Falls back to the latest events (live first, then soonest upcoming) when the provider has no separate header strip, so it's never empty.",
     [P(s.slug)],
     `[\n${matchRow(s, "prematch")}\n]`,
   );

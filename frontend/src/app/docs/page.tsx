@@ -347,7 +347,7 @@ const ENDPOINTS: Endpoint[] = [
     id: "ep-headermatches",
     display: "/v1/{provider}/headermatches",
     template: "/{provider}/headermatches",
-    summary: "Matches shown in the provider's header strip (the header ticker, distinct from the main list).",
+    summary: "Matches shown in the provider's header strip (the header ticker, distinct from the main list). Falls back to the latest events (live first, then soonest upcoming) when no separate header strip exists, so it's never empty.",
     capability: "matches",
     params: [{ name: "provider", loc: "path", required: true, desc: "Provider slug." }],
     response: (slug) => `[

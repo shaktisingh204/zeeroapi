@@ -174,7 +174,7 @@ export function endpointsFor(p: ProviderProfile): ApiEndpoint[] {
     push("matchdetails", "/matchdetails?gmid={id}", "Native detail: data.odds keyed by gmid → markets with section[] runners and back/lay levels (add &sportsid=N to scope).");
     push("leagues", "/leagues", "Leagues, filterable by sport_id.");
     push("sidebar", "/sidebar", "Full sports tree with nested leagues.");
-    push("headermatches", "/headermatches", "Matches in the header strip.");
+    push("headermatches", "/headermatches", "Header-strip matches; falls back to latest events when none flagged.");
     return eps;
   }
 
@@ -186,7 +186,7 @@ export function endpointsFor(p: ProviderProfile): ApiEndpoint[] {
   if (has("sports")) push("sidebar", "/sidebar", "Full sports tree with nested leagues.");
   if (has("live")) push("live", "/live", "Currently live matches with scores.");
   if (has("matches")) push("featured", "/featured", "Featured / promoted events.");
-  if (has("matches")) push("headermatches", "/headermatches", "Matches in the header strip.");
+  if (has("matches")) push("headermatches", "/headermatches", "Header-strip matches; falls back to latest events when none flagged.");
   if (has("matches")) push("results", "/results", "Finished matches with derived winner.");
   if (has("odds")) {
     push(
