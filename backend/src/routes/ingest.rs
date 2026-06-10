@@ -46,6 +46,21 @@ pub struct D247Snapshot {
     pub clear_featured: bool,
     #[serde(default)]
     pub clear_header: bool,
+    /// Full sports catalog (the site's "All Sports" list). Lets /sports + /sidebar
+    /// show every sport, even ones with no current matches.
+    #[serde(default)]
+    pub sports: Vec<D247Sport>,
+    /// When true, catalog sports NOT in `sports` are retired (the sidebar pass
+    /// sends the complete set each time).
+    #[serde(default)]
+    pub sweep_sports: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct D247Sport {
+    pub name: String,
+    #[serde(default)]
+    pub etid: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,6 +169,33 @@ async fn d247_snapshot(
             .bind(&snap.header_ids)
             .execute(&mut *tx)
             .await?;
+    }
+
+    // Sports catalog (the "All Sports" list).
+    if !snap.sports.is_empty() {
+        for s in &snap.sports {
+            if s.name.trim().is_empty() {
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO diamondexch_sports (name, etid, dead, updated_at)
+                 VALUES ($1, $2, false, now())
+                 ON CONFLICT (name) DO UPDATE SET
+                    etid = CASE WHEN EXCLUDED.etid > 0 THEN EXCLUDED.etid ELSE diamondexch_sports.etid END,
+                    dead = false, updated_at = now()",
+            )
+            .bind(&s.name)
+            .bind(s.etid)
+            .execute(&mut *tx)
+            .await?;
+        }
+        if snap.sweep_sports {
+            let names: Vec<&str> = snap.sports.iter().map(|s| s.name.as_str()).collect();
+            sqlx::query("UPDATE diamondexch_sports SET dead = true WHERE dead = false AND name <> ALL($1)")
+                .bind(&names)
+                .execute(&mut *tx)
+                .await?;
+        }
     }
 
     // Retire events no longer present (grace-aware, like the shared snapshot).

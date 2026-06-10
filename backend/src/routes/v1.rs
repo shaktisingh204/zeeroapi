@@ -457,20 +457,32 @@ pub(crate) async fn match_detail_d247_core(state: &AppState, client: &ApiClient,
     Ok((rate_headers(client), Json(body)))
 }
 
-// ---- diamondexch sports (derived from the events table) ----
+// ---- diamondexch sports ----
+// Merge the full catalog (the site's "All Sports" list) with live match counts
+// from the events table, keyed by name. So every sport shows — not just the few
+// that currently have matches — and sports with matches carry their real etid +
+// count. (Catalog sports with no matches get count 0 and their best-effort etid.)
 pub(crate) async fn d247_sports_core(state: &AppState, client: &ApiClient)
     -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
-    let rows: Vec<(i32, String, i64)> = sqlx::query_as(
-        "SELECT etid, max(sport) AS sport, count(*)::bigint AS match_count
-         FROM diamondexch_events WHERE dead = false AND sport <> ''
-         GROUP BY etid ORDER BY match_count DESC, sport ASC",
+    let rows: Vec<(String, i32, i64)> = sqlx::query_as(
+        "WITH ev AS (
+             SELECT sport AS name, max(etid) AS etid, count(*)::bigint AS cnt
+             FROM diamondexch_events WHERE dead = false AND sport <> '' GROUP BY sport
+         ), cat AS (
+             SELECT name, max(etid) AS etid FROM diamondexch_sports WHERE dead = false GROUP BY name
+         )
+         SELECT COALESCE(ev.name, cat.name) AS name,
+                COALESCE(NULLIF(ev.etid, 0), cat.etid, 0)::int AS etid,
+                COALESCE(ev.cnt, 0)::bigint AS match_count
+         FROM cat FULL OUTER JOIN ev ON lower(cat.name) = lower(ev.name)
+         ORDER BY match_count DESC, name ASC",
     )
     .fetch_all(&state.pool)
     .await?;
     let out = rows
         .into_iter()
-        .map(|(etid, sport, c)| json!({
-            "id": etid, "etid": etid, "name": sport, "slug": slugify_simple(&sport),
+        .map(|(name, etid, c)| json!({
+            "id": etid, "etid": etid, "name": name, "slug": slugify_simple(&name),
             "match_count": c, "provider": "diamondexch"
         }))
         .collect();
@@ -503,31 +515,41 @@ pub(crate) async fn d247_leagues_core(state: &AppState, client: &ApiClient, spor
 // ---- diamondexch sidebar (sports each with their nested leagues) ----
 pub(crate) async fn d247_sidebar_core(state: &AppState, client: &ApiClient)
     -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
-    let sports: Vec<(i32, String, i64)> = sqlx::query_as(
-        "SELECT etid, max(sport) AS sport, count(*)::bigint AS match_count
-         FROM diamondexch_events WHERE dead = false AND sport <> ''
-         GROUP BY etid ORDER BY match_count DESC, sport ASC",
+    // Full sport list (catalog merged with live counts), keyed by name.
+    let sports: Vec<(String, i32, i64)> = sqlx::query_as(
+        "WITH ev AS (
+             SELECT sport AS name, max(etid) AS etid, count(*)::bigint AS cnt
+             FROM diamondexch_events WHERE dead = false AND sport <> '' GROUP BY sport
+         ), cat AS (
+             SELECT name, max(etid) AS etid FROM diamondexch_sports WHERE dead = false GROUP BY name
+         )
+         SELECT COALESCE(ev.name, cat.name) AS name,
+                COALESCE(NULLIF(ev.etid, 0), cat.etid, 0)::int AS etid,
+                COALESCE(ev.cnt, 0)::bigint AS match_count
+         FROM cat FULL OUTER JOIN ev ON lower(cat.name) = lower(ev.name)
+         ORDER BY match_count DESC, name ASC",
     )
     .fetch_all(&state.pool)
     .await?;
-    let leagues: Vec<(i32, i64, String, i64)> = sqlx::query_as(
-        "SELECT max(etid) AS etid, cid, max(cname) AS cname, count(*)::bigint AS match_count
+    // Leagues (with current matches) grouped by sport name.
+    let leagues: Vec<(String, i64, String, i64)> = sqlx::query_as(
+        "SELECT max(sport) AS sport, cid, max(cname) AS cname, count(*)::bigint AS match_count
          FROM diamondexch_events WHERE dead = false AND cid <> 0 AND cname <> ''
          GROUP BY cid ORDER BY match_count DESC, cname ASC",
     )
     .fetch_all(&state.pool)
     .await?;
-    let mut by_sport: std::collections::HashMap<i32, Vec<Value>> = std::collections::HashMap::new();
-    for (etid, cid, cname, c) in leagues {
-        by_sport.entry(etid).or_default().push(
+    let mut by_sport: std::collections::HashMap<String, Vec<Value>> = std::collections::HashMap::new();
+    for (sport, cid, cname, c) in leagues {
+        by_sport.entry(sport.to_lowercase()).or_default().push(
             json!({ "id": cid, "name": cname, "country": Value::Null, "match_count": c }),
         );
     }
     let out = sports
         .into_iter()
-        .map(|(etid, sport, c)| json!({
-            "id": etid, "etid": etid, "name": sport, "slug": slugify_simple(&sport),
-            "match_count": c, "leagues": by_sport.remove(&etid).unwrap_or_default()
+        .map(|(name, etid, c)| json!({
+            "id": etid, "etid": etid, "name": name, "slug": slugify_simple(&name),
+            "match_count": c, "leagues": by_sport.remove(&name.to_lowercase()).unwrap_or_default()
         }))
         .collect();
     Ok((rate_headers(client), Json(out)))

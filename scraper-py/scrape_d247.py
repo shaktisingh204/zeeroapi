@@ -164,13 +164,21 @@ SIDEBAR_JS = r"""
         const name = clean(span ? span.innerText : a.innerText);
         if (!name || name.length > 32 || seen.has(name)) continue;
         seen.add(name);
+        // Best-effort etid: the sport links to /all-sports/{etid} (events supply
+        // the authoritative etid for sports that have matches).
+        let etid = 0;
+        for (const link of li.querySelectorAll('a[href]')) {
+            const h = link.getAttribute('href') || '';
+            const mm = h.match(/all-sports\/(\d+)/) || h.match(/sport[s]?\/(\d+)/);
+            if (mm) { etid = parseInt(mm[1], 10) || 0; break; }
+        }
         const leagues = [];
         const seenL = new Set();
         li.querySelectorAll('ul a span').forEach(le => {
             const ln = clean(le.innerText);
             if (ln && ln !== name && ln.length < 60 && !seenL.has(ln)) { seenL.add(ln); leagues.push(ln); }
         });
-        out.push({ name, leagues: leagues.slice(0, 50) });
+        out.push({ name, etid, leagues: leagues.slice(0, 50) });
     }
     return out;
 }
@@ -628,16 +636,43 @@ async def _is_logged_in(page):
     return False
 
 
-async def demo_login(page, deadline_s=75):
+# Page-title markers for a Cloudflare/Chrome error shell (NOT the real app). When
+# we see one, the cure is to RELOAD, not to keep polling for a button that will
+# never render. "Reload a page" is Chrome's net-error page; "Just a moment" /
+# "Attention Required" are Cloudflare interstitials.
+ERROR_SHELL_MARKERS = (
+    "reload", "just a moment", "attention required", "error",
+    "isn't working", "not work", "verify you are human", "blocked",
+)
+
+
+async def _looks_like_error_shell(page):
+    try:
+        t = (await page.title() or "").lower()
+    except Exception:
+        return True  # couldn't even read the title → treat as broken
+    return any(k in t for k in ERROR_SHELL_MARKERS)
+
+
+async def demo_login(page, deadline_s=90):
     """Open d247, wait out Cloudflare, and start a demo session.
 
     Resilient to: slow Cloudflare challenges (polls instead of a fixed sleep),
-    button-text changes (multiple candidate selectors), and an already-live
-    session. Raises a clear RuntimeError with diagnostics if none works."""
-    await page.goto(f"{SITE}/", wait_until="domcontentloaded", timeout=60000)
+    button-text changes (multiple candidate selectors), an already-live session,
+    AND the transient Cloudflare/Chrome "Reload a page" error shell — which we
+    RELOAD through instead of fruitlessly waiting for a login button. Raises a
+    clear RuntimeError with diagnostics only after exhausting reloads."""
+    async def nav():
+        try:
+            await page.goto(f"{SITE}/", wait_until="domcontentloaded", timeout=60000)
+        except Exception:
+            pass
 
+    await nav()
     start = time.monotonic()
     clicked = False
+    reloads = 0
+    last_reload = time.monotonic()
     while time.monotonic() - start < deadline_s:
         # Already inside? (Cloudflare may auto-restore a session, or a prior pass
         # left us logged in.) Then there's nothing to click.
@@ -645,6 +680,18 @@ async def demo_login(page, deadline_s=75):
             print("demo session ready (already logged in):", page.url)
             await dismiss_modal(page)
             return
+
+        # On a Cloudflare/Chrome error shell, or stuck for >15s, reload and retry.
+        bad = await _looks_like_error_shell(page)
+        if bad or (time.monotonic() - last_reload) > 15:
+            reloads += 1
+            last_reload = time.monotonic()
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=60000)
+            except Exception:
+                await nav()
+            await page.wait_for_timeout(2500)
+            continue
 
         for sel in DEMO_LOGIN_SELECTORS:
             try:
@@ -658,16 +705,15 @@ async def demo_login(page, deadline_s=75):
         if clicked:
             break
 
-        # Not ready yet — Cloudflare's JS challenge or the SPA bundle is still
-        # loading. Wait a beat and re-check rather than failing at a fixed 9s.
+        # SPA bundle / Cloudflare JS still loading — wait a beat and re-check.
         await page.wait_for_timeout(2000)
 
     if not clicked and not await _is_logged_in(page):
-        await _diagnose_login(page, "no demo-login control appeared")
+        await _diagnose_login(page, f"no demo-login control appeared (after {reloads} reloads)")
         raise RuntimeError(
             "d247 demo login failed: none of the demo-login selectors matched "
-            f"within {deadline_s}s (see /tmp/d247_login_fail.png and the button "
-            "list above — d247 likely changed the login markup)."
+            f"within {deadline_s}s / {reloads} reloads (see /tmp/d247_login_fail.png "
+            "and the button list above — Cloudflare block or changed login markup)."
         )
 
     # Wait for the dashboard to actually render before we declare success.
@@ -789,6 +835,21 @@ async def scrape_sidebar(client, page):
         r.raise_for_status()
         b = r.json()
         nl = sum(len(n["leagues"]) for n in nodes)
+        # Native d247 table: store the full sports CATALOG (name + best-effort
+        # etid) so /sports + /sidebar list every sport, not just ones with
+        # current matches. sweep_sports makes the catalog authoritative each pass.
+        catalog = [{"name": s["name"], "etid": int(s.get("etid") or 0)} for s in sports]
+        try:
+            cr = await client.post(
+                f"{BACKEND_URL}/api/ingest/d247",
+                headers={"X-Ingest-Key": INGEST_KEY},
+                json={"source": "d247-sidebar", "events": [],
+                      "sports": catalog, "sweep_sports": True},
+                timeout=30,
+            )
+            cr.raise_for_status()
+        except Exception as e:
+            print(f"  sidebar d247 catalog POST failed: {e}", file=sys.stderr)
         print(f"  sidebar: {len(nodes)} sports, {nl} leagues → "
               f"{b.get('sports', 0)} sports / {b.get('leagues', 0)} leagues upserted")
         return len(nodes)
@@ -1401,6 +1462,10 @@ class NodriverPage:
     async def goto(self, url, wait_until=None, timeout=None):
         self._tab = await self._browser.get(url)
         self._url = url
+
+    async def reload(self, wait_until=None, timeout=None):
+        # nodriver has no direct reload in our adapter; re-navigate to current url.
+        await self.goto(self._url)
 
     async def wait_for_timeout(self, ms):
         await asyncio.sleep(ms / 1000)
