@@ -655,8 +655,9 @@ export default function DocsPage() {
               <CodeBlock code={API_V1} label="base url" />
             </div>
             <p className="mt-4 text-sm text-slate-500">
-              The provider can go in the path (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">/v1/{`{provider}`}/live</code>)
-              {" "}or as a query parameter (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">/v1/live?provider=melbet</code>). Both work.
+              Every endpoint is static per provider: the provider is part of the path
+              (<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">/v1/{`{provider}`}/live</code>).
+              Each provider also exposes only its own kind of endpoints.
             </p>
           </section>
 
@@ -790,7 +791,11 @@ export default function DocsPage() {
 
           <div className="space-y-12">
             {ENDPOINTS.map((ep) => {
-              const available = !ep.capability || (current?.caps.includes(ep.capability) ?? true);
+              // Exchange (d247) exposes EXACTLY 6 endpoints; everything else is "not on" it.
+              const EXCHANGE_OK = new Set(["ep-sports", "ep-matches", "ep-match", "ep-leagues", "ep-sidebar", "ep-headermatches"]);
+              const available = isExchange
+                ? EXCHANGE_OK.has(ep.id)
+                : !ep.capability || (current?.caps.includes(ep.capability) ?? true);
               const examplePath = ep.template.replace("{provider}", slug).replace("{id}", isExchange ? "884213" : "887542438404651");
               const displayPath = ep.display;
               return (

@@ -18,15 +18,19 @@ const ENDPOINTS: { method: string; path: string; desc: string }[] = [
   { method: "GET", path: "/v1/{provider}/featured", desc: "Featured / highlighted events (promoted strip)." },
   { method: "GET", path: "/v1/{provider}/headermatches", desc: "Matches in the provider's header strip." },
   { method: "GET", path: "/v1/{provider}/results", desc: "Recently finished matches with derived winner." },
-  { method: "GET", path: "/v1/{provider}/odds/{match_id}", desc: "All odds/markets for a match (exchanges add lay + volume + suspended)." },
+  { method: "GET", path: "/v1/{provider}/odds/{match_id}", desc: "Flat odds for a match (exchanges add lay + volume + suspended)." },
+  { method: "GET", path: "/v1/{provider}/markets/{match_id}", desc: "Odds grouped by market, with each market's outcomes." },
+  { method: "GET", path: "/v1/{provider}/prematch", desc: "Sportsbook only — scheduled (prematch) matches." },
+  { method: "GET", path: "/v1/{provider}/marketgroups", desc: "Sportsbook only — the market-group tree offered." },
+  { method: "GET", path: "/v1/{provider}/suspended", desc: "Exchange only — events locked (suspended) in-play now." },
 ];
 
-// Both forms work — provider in the path (canonical) or as a ?provider= query param.
+// Every endpoint is static per provider — the provider is part of the path.
 const CURL_EXAMPLE = `# replace YOUR_KEY with a key from the Customers tab
 curl -H "X-API-Key: YOUR_KEY" "${V1_URL}/melbet/live"
 
-# equivalent (provider as a query param):
-curl -H "X-API-Key: YOUR_KEY" "${V1_URL}/live?provider=melbet"`;
+# each provider has its own path, e.g. the d247 exchange:
+curl -H "X-API-Key: YOUR_KEY" "${V1_URL}/diamondexch/headermatches"`;
 
 export default function DevelopersPage() {
   const [plans, setPlans] = useState<Plan[]>([]);

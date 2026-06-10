@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { Search, Swords } from "lucide-react";
+import { Search, Swords, Lock, Star, Pin } from "lucide-react";
 import { api } from "@/lib/api";
 import type { MatchView, Sport } from "@/lib/types";
 import { useAdminProvider } from "@/lib/adminProvider";
@@ -24,17 +24,33 @@ export default function MatchesPage() {
   const [status, setStatus] = useState("");
   const [sportId, setSportId] = useState("");
   const [search, setSearch] = useState("");
+  // Client-side flag filters (AND semantics; all off by default).
+  const [onlySuspended, setOnlySuspended] = useState(false);
+  const [onlyFeatured, setOnlyFeatured] = useState(false);
+  const [onlyHeader, setOnlyHeader] = useState(false);
 
   const columns: Column<MatchView>[] = [
     {
       key: "match",
       header: "Match",
       render: (m) => (
-        <Link href={`/app/matches/${m.id}`} className="hover:text-brand">
-          <span className="text-white">{m.home_team}</span>
-          <span className="text-muted mx-1.5">vs</span>
-          <span className="text-white">{m.away_team}</span>
-        </Link>
+        <span className="inline-flex items-center gap-1.5">
+          <Link href={`/app/matches/${m.id}`} className="hover:text-brand">
+            <span className="text-white">{m.home_team}</span>
+            <span className="text-muted mx-1.5">vs</span>
+            <span className="text-white">{m.away_team}</span>
+          </Link>
+          {m.suspended && (
+            <span
+              title="Suspended"
+              className="inline-flex items-center gap-0.5 text-xs text-live"
+            >
+              <Lock size={12} /> suspended
+            </span>
+          )}
+          {m.featured && <Star size={13} className="text-yellow-400" aria-label="Featured" />}
+          {m.header && <Pin size={13} className="text-blue-400" aria-label="Header" />}
+        </span>
       ),
     },
     {
@@ -94,6 +110,13 @@ export default function MatchesPage() {
     return () => clearTimeout(t);
   }, [load]);
 
+  const visibleMatches = matches.filter(
+    (m) =>
+      (!onlySuspended || m.suspended) &&
+      (!onlyFeatured || m.featured) &&
+      (!onlyHeader || m.header),
+  );
+
   return (
     <div>
       <PageHeader
@@ -125,12 +148,23 @@ export default function MatchesPage() {
             </option>
           ))}
         </select>
+        <div className="flex items-center gap-2">
+          <FilterPill active={onlySuspended} onClick={() => setOnlySuspended((v) => !v)}>
+            <Lock size={12} /> Suspended
+          </FilterPill>
+          <FilterPill active={onlyFeatured} onClick={() => setOnlyFeatured((v) => !v)}>
+            <Star size={12} /> Featured
+          </FilterPill>
+          <FilterPill active={onlyHeader} onClick={() => setOnlyHeader((v) => !v)}>
+            <Pin size={12} /> Header
+          </FilterPill>
+        </div>
       </div>
 
       <div className="card overflow-hidden">
         <DataTable
           columns={columns}
-          rows={matches}
+          rows={visibleMatches}
           rowKey={(m) => m.id}
           loading={loading}
           empty={
@@ -143,5 +177,28 @@ export default function MatchesPage() {
         />
       </div>
     </div>
+  );
+}
+
+function FilterPill({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`badge inline-flex items-center gap-1 transition-colors ${
+        active ? "bg-brand/15 text-brand" : "bg-surface-2 text-muted hover:text-white"
+      }`}
+    >
+      {children}
+    </button>
   );
 }

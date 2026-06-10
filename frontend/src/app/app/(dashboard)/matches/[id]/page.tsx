@@ -10,12 +10,18 @@ import {
 import { api } from "@/lib/api";
 import type { MatchDetail, Odd, OddPoint } from "@/lib/types";
 import { TOOLTIP_STYLE } from "@/lib/theme";
-import { PageHeader, Spinner, EmptyState, StatusBadge } from "@/components/ui";
+import { PageHeader, Spinner, EmptyState, StatusBadge, Badge } from "@/components/ui";
+import {
+  getProviderProfiles,
+  oddColumnsFor,
+  type ProviderProfile,
+} from "@/lib/providerProfiles";
 
 export default function MatchDetailPage() {
   const params = useParams();
   const id = Number(params.id);
   const [match, setMatch] = useState<MatchDetail | null>(null);
+  const [profile, setProfile] = useState<ProviderProfile | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [notFound, setNotFound] = useState(false);
@@ -50,6 +56,19 @@ export default function MatchDetailPage() {
     return () => clearInterval(t);
   }, [id]);
 
+  // Resolve the provider profile so the odds table renders the provider's
+  // native column shape (exchange back/lay/volume vs sportsbook price/line).
+  useEffect(() => {
+    if (!match?.provider) return;
+    let live = true;
+    getProviderProfiles().then((list) => {
+      if (live) setProfile(list.find((p) => p.slug === match.provider) ?? null);
+    });
+    return () => {
+      live = false;
+    };
+  }, [match?.provider]);
+
   if (loading && !match) return <Spinner />;
   if (notFound || !match)
     return (
@@ -68,6 +87,65 @@ export default function MatchDetailPage() {
     (acc[o.market] ??= []).push(o);
     return acc;
   }, {});
+
+  // Provider-native odds columns. Fall back to a sportsbook shape until the
+  // profile resolves (or if the provider is unknown).
+  const fallbackProfile: ProviderProfile = {
+    slug: match.provider,
+    name: match.provider,
+    kind: "sportsbook",
+    capabilities: [],
+    dataSource: "",
+    markets: [],
+    oddFields: [],
+    matchFields: [],
+    accent: "#34d27b",
+    blurb: "",
+  };
+  const oddColumns = oddColumnsFor(profile ?? fallbackProfile);
+  const dash = <span className="text-muted">—</span>;
+  const renderCell = (o: Odd, key: string) => {
+    switch (key) {
+      case "market":
+        return o.market;
+      case "outcome":
+        return <span className="text-white">{o.outcome}</span>;
+      case "value":
+        return (
+          <span className="text-brand font-semibold tabular-nums">
+            {o.value != null && o.value !== "" ? Number(o.value).toFixed(2) : dash}
+          </span>
+        );
+      case "lay":
+        return o.lay != null && o.lay !== "" ? (
+          <span className="text-blue-400 font-semibold tabular-nums">
+            {Number(o.lay).toFixed(2)}
+          </span>
+        ) : (
+          dash
+        );
+      case "volume":
+        return o.volume != null && o.volume !== "" ? (
+          <span className="text-muted tabular-nums">{o.volume}</span>
+        ) : (
+          dash
+        );
+      case "param":
+        return o.param != null && o.param !== "" ? (
+          <span className="text-muted tabular-nums">{o.param}</span>
+        ) : (
+          dash
+        );
+      case "suspended":
+        return o.suspended ? (
+          <Badge variant="danger">Suspended</Badge>
+        ) : (
+          <Badge variant="success">Open</Badge>
+        );
+      default:
+        return dash;
+    }
+  };
 
   return (
     <div>
@@ -160,31 +238,56 @@ export default function MatchDetailPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {Object.entries(byMarket).map(([market, odds]) => (
-            <div key={market} className="card p-4">
-              <h3 className="text-sm font-semibold text-white mb-3">{market}</h3>
-              <div className="space-y-2">
-                {odds.map((o) => (
-                  <button
-                    key={o.id}
-                    onClick={() => showMovement(o.market, o.outcome)}
-                    title="Show line movement"
-                    className={`w-full flex items-center justify-between rounded-md px-2 py-1 -mx-2 hover:bg-surface-2/60 transition-colors ${
-                      pick?.market === o.market && pick?.outcome === o.outcome ? "bg-brand/10" : ""
-                    }`}
-                  >
-                    <span className="text-sm text-muted">
-                      {o.outcome}
-                      {o.param ? ` (${o.param})` : ""}
-                    </span>
-                    <span className="badge bg-surface-2 text-brand font-semibold tabular-nums">
-                      {Number(o.value).toFixed(2)}
-                    </span>
-                  </button>
-                ))}
+          {Object.entries(byMarket).map(([market, odds]) => {
+            // Drop the redundant "Market" column inside a per-market card.
+            const cols = oddColumns.filter((c) => c.key !== "market");
+            return (
+              <div key={market} className="card p-4">
+                <h3 className="text-sm font-semibold text-white mb-3">{market}</h3>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr>
+                      {cols.map((c) => (
+                        <th
+                          key={c.key}
+                          className={`th !px-2 !py-1 text-left ${
+                            c.key !== "outcome" ? "text-right" : ""
+                          }`}
+                        >
+                          {c.label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {odds.map((o) => (
+                      <tr
+                        key={o.id}
+                        onClick={() => showMovement(o.market, o.outcome)}
+                        title="Show line movement"
+                        className={`cursor-pointer hover:bg-surface-2/60 transition-colors ${
+                          pick?.market === o.market && pick?.outcome === o.outcome
+                            ? "bg-brand/10"
+                            : ""
+                        }`}
+                      >
+                        {cols.map((c) => (
+                          <td
+                            key={c.key}
+                            className={`td !px-2 !py-1.5 ${
+                              c.key !== "outcome" ? "text-right" : ""
+                            }`}
+                          >
+                            {renderCell(o, c.key)}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

@@ -7,5 +7,5 @@ use crate::state::AppState;
 use axum::Router;
 
 pub fn router() -> Router<AppState> {
-    super::build("megapari")
+    super::build_sportsbook("megapari")
 }

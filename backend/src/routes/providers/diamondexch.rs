@@ -16,5 +16,5 @@ use crate::state::AppState;
 use axum::Router;
 
 pub fn router() -> Router<AppState> {
-    super::build("diamondexch")
+    super::build_exchange("diamondexch")
 }

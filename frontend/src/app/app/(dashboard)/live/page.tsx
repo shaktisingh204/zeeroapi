@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { Lock, Star, Pin } from "lucide-react";
 import { api } from "@/lib/api";
 import type { MatchView } from "@/lib/types";
 import { useAdminProvider } from "@/lib/adminProvider";
@@ -13,6 +14,10 @@ export default function LivePage() {
   const [matches, setMatches] = useState<MatchView[]>([]);
   const [loading, setLoading] = useState(true);
   const [updated, setUpdated] = useState<Date | null>(null);
+  // Client-side flag filters (AND semantics; all off by default).
+  const [onlySuspended, setOnlySuspended] = useState(false);
+  const [onlyFeatured, setOnlyFeatured] = useState(false);
+  const [onlyHeader, setOnlyHeader] = useState(false);
 
   useEffect(() => {
     const load = () =>
@@ -30,6 +35,13 @@ export default function LivePage() {
 
   if (loading && matches.length === 0) return <Spinner />;
 
+  const visibleMatches = matches.filter(
+    (m) =>
+      (!onlySuspended || m.suspended) &&
+      (!onlyFeatured || m.featured) &&
+      (!onlyHeader || m.header),
+  );
+
   return (
     <div>
       <PageHeader
@@ -41,13 +53,25 @@ export default function LivePage() {
         }
       />
 
-      {matches.length === 0 ? (
+      <div className="flex items-center gap-2 mb-4">
+        <FilterPill active={onlySuspended} onClick={() => setOnlySuspended((v) => !v)}>
+          <Lock size={12} /> Suspended
+        </FilterPill>
+        <FilterPill active={onlyFeatured} onClick={() => setOnlyFeatured((v) => !v)}>
+          <Star size={12} /> Featured
+        </FilterPill>
+        <FilterPill active={onlyHeader} onClick={() => setOnlyHeader((v) => !v)}>
+          <Pin size={12} /> Header
+        </FilterPill>
+      </div>
+
+      {visibleMatches.length === 0 ? (
         <div className="card">
           <EmptyState message="No live matches right now." />
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {matches.map((m) => (
+          {visibleMatches.map((m) => (
             <Link
               key={m.id}
               href={`/app/matches/${m.id}`}
@@ -59,6 +83,9 @@ export default function LivePage() {
                   {m.league_name ? ` · ${m.league_name}` : ""}
                 </span>
                 <span className="flex items-center gap-1.5 text-xs text-live font-medium">
+                  {m.suspended && <Lock size={12} aria-label="Suspended" />}
+                  {m.featured && <Star size={12} className="text-yellow-400" aria-label="Featured" />}
+                  {m.header && <Pin size={12} className="text-blue-400" aria-label="Header" />}
                   <span className="live-dot inline-block" />
                   {m.match_time || m.period || "LIVE"}
                 </span>
@@ -70,6 +97,29 @@ export default function LivePage() {
         </div>
       )}
     </div>
+  );
+}
+
+function FilterPill({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`badge inline-flex items-center gap-1 transition-colors ${
+        active ? "bg-brand/15 text-brand" : "bg-surface-2 text-muted hover:text-white"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 

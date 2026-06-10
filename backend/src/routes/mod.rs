@@ -57,15 +57,17 @@ async fn health() -> Json<serde_json::Value> {
 async fn public_providers(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> Json<serde_json::Value> {
-    let rows: Vec<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT slug, name, capabilities FROM providers WHERE is_active ORDER BY name",
+    let rows: Vec<(String, String, serde_json::Value, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT slug, name, capabilities, kind, profile FROM providers WHERE is_active ORDER BY name",
     )
     .fetch_all(&state.pool)
     .await
     .unwrap_or_default();
     let list: Vec<_> = rows
         .into_iter()
-        .map(|(slug, name, capabilities)| json!({ "slug": slug, "name": name, "capabilities": capabilities }))
+        .map(|(slug, name, capabilities, kind, profile)| {
+            json!({ "slug": slug, "name": name, "capabilities": capabilities, "kind": kind, "profile": profile })
+        })
         .collect();
     Json(json!(list))
 }

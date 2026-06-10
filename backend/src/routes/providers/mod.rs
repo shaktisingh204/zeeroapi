@@ -27,18 +27,75 @@ use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, Router};
 
-/// Build one provider's full endpoint router. The `slug` is bound into every
-/// handler; capability checks (and the native vs exchange data shape) happen in
-/// the shared `v1::*_core` functions.
+/// Sportsbook providers: the common set PLUS sportsbook-native endpoints
+/// (`/prematch`, `/marketgroups`).
+pub(crate) fn build_sportsbook(slug: &'static str) -> Router<AppState> {
+    build_common(slug)
+        .route(
+            "/prematch",
+            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::prematch_core(&s, &c, slug).await }),
+        )
+        .route(
+            "/marketgroups",
+            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::marketgroups_core(&s, &c, slug).await }),
+        )
+}
+
+/// Exchange providers (d247): EXACTLY 6 endpoints — the canonical flow plus the
+/// header strip. Odds are delivered inside `/matchdetails/:id`, so there is no
+/// separate odds / markets / live / featured / results endpoint here.
+///   1. GET /sports
+///   2. GET /matches?sport_id=ID
+///   3. GET /matchdetails/:id   (match detail + all odds, back/lay/volume/suspended)
+///   4. GET /leagues?sport_id=ID
+///   5. GET /sidebar
+///   6. GET /headermatches
+pub(crate) fn build_exchange(slug: &'static str) -> Router<AppState> {
+    Router::new()
+        .route(
+            "/sports",
+            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::sports_core(&s, &c, slug).await }),
+        )
+        .route(
+            "/matches",
+            get(move |State(s): State<AppState>, c: ApiClient, Query(q): Query<v1::ListQuery>| async move {
+                v1::matches_core(&s, &c, slug, q).await
+            }),
+        )
+        .route(
+            "/matchdetails/:id",
+            get(move |State(s): State<AppState>, c: ApiClient, Path(id): Path<i64>| async move {
+                v1::match_detail_core(&s, &c, slug, id).await
+            }),
+        )
+        .route(
+            "/leagues",
+            get(move |State(s): State<AppState>, c: ApiClient, Query(q): Query<v1::ListQuery>| async move {
+                v1::leagues_core(&s, &c, slug, q.sport_id).await
+            }),
+        )
+        .route(
+            "/sidebar",
+            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::sidebar_core(&s, &c, slug).await }),
+        )
+        .route(
+            "/headermatches",
+            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::header_matches_core(&s, &c, slug).await }),
+        )
+}
+
+/// Endpoints every provider exposes, regardless of kind. The `slug` is bound
+/// into every handler; capability checks (and the native vs exchange data shape)
+/// happen in the shared `v1::*_core` functions.
 ///
-/// Endpoint flow (the canonical order):
-///   1. GET /sports                 — sports + ids
-///   2. GET /matches?sport_id=ID    — all matches for a sport (also status / search / paging)
-///   3. GET /matches/:id            — match detail + all odds  (alias: /matchdetails/:id)
-///   4. GET /leagues?sport_id=ID    — leagues
-///   5. GET /sidebar                — full sports → leagues tree
-///   plus /live, /featured, /headermatches, /results, /odds/:match_id
-pub(crate) fn build(slug: &'static str) -> Router<AppState> {
+/// Canonical flow:
+///   1. GET /sports                — sports + ids
+///   2. GET /matches?sport_id=ID   — all matches for a sport (status / search / paging)
+///   3. GET /matchdetails/:id      — match detail + all odds (alias of /matches/:id)
+///   4. GET /leagues?sport_id=ID   — leagues
+///   5. GET /sidebar               — full sports → leagues tree
+///   plus /live, /featured, /headermatches, /results, /odds/:id, /markets/:id
+fn build_common(slug: &'static str) -> Router<AppState> {
     Router::new()
         .route(
             "/sports",
@@ -92,6 +149,12 @@ pub(crate) fn build(slug: &'static str) -> Router<AppState> {
             "/odds/:match_id",
             get(move |State(s): State<AppState>, c: ApiClient, Path(mid): Path<i64>| async move {
                 v1::match_odds_core(&s, &c, slug, mid).await
+            }),
+        )
+        .route(
+            "/markets/:match_id",
+            get(move |State(s): State<AppState>, c: ApiClient, Path(mid): Path<i64>| async move {
+                v1::markets_core(&s, &c, slug, mid).await
             }),
         )
 }
