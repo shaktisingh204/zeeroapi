@@ -217,166 +217,34 @@ pub(crate) async fn matches_core(state: &AppState, client: &ApiClient, provider:
         .await?;
     Ok((rate_headers(client), Json(rows)))
 }
-// ---- matches (list) in the d247 NATIVE shape (exchange: diamondexch) ----
-// d247's own feed returns matches split into `t1` (open) and `t2` (suspended),
-// each event carrying its Match Odds runners as `section[]` with back/lay prices
-// and matched size. We reproduce that exact envelope from our stored matches +
-// odds so consumers can treat /api/v1/diamondexch/matches like the source feed.
-// Native-only ids we don't scrape (sid, mid, tno, …) default to 0/false.
+// ============ Diamond Exch (d247) — served from its own native table ==========
+// Every diamondexch endpoint reads `diamondexch_events` (migration 0026), where
+// the scraper stored d247's native exchange shape verbatim: event → lean markets
+// → runners → back/lay price LEVELS with sizes + suspension. We assemble d247's
+// native JSON envelopes from those rows. (The shared matches/odds tables are
+// sportsbook-only; forcing the exchange through them was lossy.)
 
-fn d247_etid(sport: &str) -> i64 {
-    let s = sport.to_lowercase();
-    if s.contains("cricket") {
-        4
-    } else if s.contains("table") && s.contains("tennis") {
-        8
-    } else if s.contains("tennis") {
-        2
-    } else if s.contains("soccer") || s.contains("football") {
-        1
-    } else {
-        0
-    }
+#[derive(sqlx::FromRow)]
+struct DxRow {
+    gmid: i64,
+    etid: i32,
+    sport: String,
+    cid: i64,
+    cname: String,
+    ename: String,
+    home: String,
+    away: String,
+    iplay: bool,
+    stime: Option<String>,
+    suspended: bool,
+    featured: bool,
+    #[allow(dead_code)]
+    header: bool,
+    markets: Value,
 }
 
-fn dec_f64(d: Option<rust_decimal::Decimal>) -> f64 {
-    use rust_decimal::prelude::ToPrimitive;
-    d.and_then(|v| v.to_f64()).unwrap_or(0.0)
-}
-
-// One runner (selection) in the native `section[]` shape: a back + a lay entry.
-fn d247_section(sno: i64, nat: &str, back: f64, lay: f64, size: f64, suspended: bool) -> Value {
-    // Native casing: ACTIVE rows use lowercase oname/otype, SUSPENDED uppercase.
-    let (b1, bt, l1, lt) = if suspended {
-        ("BACK1", "BACK", "LAY1", "LAY")
-    } else {
-        ("back1", "back", "lay1", "lay")
-    };
-    json!({
-        "sid": 0, "sno": sno,
-        "gstatus": if suspended { "SUSPENDED" } else { "ACTIVE" },
-        "gscode": if suspended { 0 } else { 1 },
-        "nat": nat,
-        "odds": [
-            { "odds": back, "oname": b1, "otype": bt, "sid": 0, "tno": 0, "size": size },
-            { "odds": lay,  "oname": l1, "otype": lt, "sid": 0, "tno": 0, "size": size }
-        ]
-    })
-}
-
-fn d247_event(m: &MatchView, mo: &[Odd], suspended: bool) -> Value {
-    let ename = if m.away_team.trim().is_empty() {
-        m.home_team.clone()
-    } else {
-        format!("{} v {}", m.home_team, m.away_team)
-    };
-    // Start time: prefer the parsed timestamp, else the captured display string.
-    let stime = m
-        .start_time
-        .map(|t| t.format("%-m/%-d/%Y %-I:%M:%S %p").to_string())
-        .or_else(|| m.match_time.clone())
-        .unwrap_or_default();
-
-    let mut sections = Vec::new();
-    if mo.is_empty() {
-        // No captured Match Odds rows (e.g. a freshly-locked event) — still emit
-        // the two-runner shell d247 shows, with names if we have them.
-        for (i, sno) in [1_i64, 3].iter().enumerate() {
-            let nat = if i == 0 { m.home_team.as_str() } else { m.away_team.as_str() };
-            sections.push(d247_section(*sno, nat, 0.0, 0.0, 0.0, true));
-        }
-    } else {
-        let mut sno = 1_i64;
-        for o in mo {
-            let s_susp = suspended || o.suspended;
-            sections.push(d247_section(
-                sno,
-                &o.outcome,
-                dec_f64(Some(o.value)),
-                dec_f64(o.lay),
-                dec_f64(o.volume),
-                s_susp,
-            ));
-            sno += 2; // native numbers runners 1, 3, 5, …
-        }
-    }
-
-    json!({
-        "gmid": m.id,
-        "ename": ename,
-        "etid": d247_etid(&m.sport_name),
-        "cid": m.league_id.unwrap_or(0),
-        "cname": m.league_name.clone().unwrap_or_default(),
-        "iplay": m.status == "live",
-        "stime": stime,
-        "tv": false, "bm": false, "f": m.featured, "f1": false, "iscc": 0,
-        "mid": 0, "mname": "MATCH_ODDS",
-        "status": if suspended { "SUSPENDED" } else { "OPEN" },
-        "rc": sections.len(),
-        "gscode": if suspended { 0 } else { 1 },
-        "m": 0, "oid": 1, "gtype": "match",
-        "section": sections
-    })
-}
-
-pub(crate) async fn matches_d247_core(state: &AppState, client: &ApiClient, provider: &str, mut q: ListQuery)
-    -> AppResult<(HeaderMap, Json<Value>)> {
-    // The native feed returns the full board; default to a large page here.
-    if q.limit.is_none() {
-        q.limit = Some(500);
-    }
-    let (headers, Json(rows)) = matches_core(state, client, provider, q).await?;
-    let ids: Vec<i64> = rows.iter().map(|m| m.id).collect();
-    // Only the Match Odds market feeds the section runners (the native list shows
-    // mname=MATCH_ODDS). Other markets remain available via /matchdetails.
-    let odds: Vec<Odd> = if ids.is_empty() {
-        Vec::new()
-    } else {
-        sqlx::query_as(
-            "SELECT * FROM odds
-             WHERE match_id = ANY($1)
-               AND lower(replace(market, '_', ' ')) IN ('match odds', 'matchodds')
-             ORDER BY match_id, id",
-        )
-        .bind(&ids)
-        .fetch_all(&state.pool)
-        .await?
-    };
-    let mut by_match: std::collections::HashMap<i64, Vec<Odd>> = std::collections::HashMap::new();
-    for o in odds {
-        by_match.entry(o.match_id).or_default().push(o);
-    }
-
-    let (mut t1, mut t2) = (Vec::new(), Vec::new());
-    for m in &rows {
-        let suspended = m.suspended || m.status == "suspended";
-        let mo = by_match.get(&m.id).map(|v| v.as_slice()).unwrap_or(&[]);
-        let event = d247_event(m, mo, suspended);
-        if suspended {
-            t2.push(event);
-        } else {
-            t1.push(event);
-        }
-    }
-
-    let body = json!({
-        "success": true,
-        "message": "Success",
-        "data": { "t1": t1, "t2": t2 },
-        "apiInfo": {
-            "provider": "ZeroApi",
-            "website": "https://zeroapi.io",
-            "message": "Real-time exchange data served by ZeroApi. t1 = open markets, t2 = suspended."
-        }
-    });
-    Ok((headers, Json(body)))
-}
-// ---- match detail in the d247 NATIVE shape (exchange: diamondexch) ----
-// Native d247 returns markets keyed by gmid: { data: { odds: { "<gmid>": [ market,
-// … ] }, missing_gmids: [] } }. Each market has section[] runners, each runner an
-// odds[] of price levels (back1/lay1 …). Called as ?gmid=ID&sportsid=N (gmid may
-// be comma-separated for a batch). We rebuild this from our stored matches+odds;
-// we only hold the best (level-1) back/lay, so each runner emits back1 + lay1.
+const DX_COLS: &str =
+    "gmid, etid, sport, cid, cname, ename, home, away, iplay, stime, suspended, featured, header, markets";
 
 /// Parse a `gmid` query value: a single id or a comma-separated list.
 pub(crate) fn parse_gmids(raw: Option<&str>) -> Vec<i64> {
@@ -387,10 +255,18 @@ pub(crate) fn parse_gmids(raw: Option<&str>) -> Vec<i64> {
 #[derive(Debug, Deserialize)]
 pub struct DetailQuery {
     pub gmid: Option<String>,
-    // d247 routes by sport; accepted for parity but not required (the gmid is
-    // globally unique in our store). Unused beyond being allowed in the query.
+    // d247 routes by sport; accepted for parity but not required (gmid is unique).
     #[allow(dead_code)]
     pub sportsid: Option<i64>,
+}
+
+fn slugify_simple(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
 }
 
 fn d247_market_names(market: &str) -> (String, String) {
@@ -404,45 +280,154 @@ fn d247_market_names(market: &str) -> (String, String) {
     }
 }
 
-fn d247_market(gmid: i64, market: &str, rows: &[&Odd], live: bool, sno: i64) -> Value {
+// Build native odds[] price levels for one side (back/lay) from a lean array of
+// {odds,size}. Native casing: lowercase when active, uppercase when suspended.
+fn dx_levels(side: Option<&Vec<Value>>, lc: &str, uc: &str, suspended: bool) -> Vec<Value> {
+    let mut out = Vec::new();
+    if let Some(arr) = side {
+        for (i, lvl) in arr.iter().enumerate() {
+            let n = i + 1;
+            let (oname, otype) = if suspended {
+                (format!("{uc}{n}"), uc.to_string())
+            } else {
+                (format!("{lc}{n}"), lc.to_string())
+            };
+            out.push(json!({
+                "psid": 0,
+                "odds": lvl.get("odds").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                "otype": otype, "oname": oname, "tno": i,
+                "size": lvl.get("size").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            }));
+        }
+    }
+    out
+}
+
+// Convert a lean market { market, gtype, suspended, runners:[{nat,suspended,back,lay}] }
+// into d247's native market object with section[] runners.
+fn dx_native_market(gmid: i64, lean: &Value, sno: i64, iplay: bool, event_susp: bool) -> Value {
+    let market = lean.get("market").and_then(|v| v.as_str()).unwrap_or("Match Odds");
     let (mname, gtype) = d247_market_names(market);
+    let msusp = event_susp || lean.get("suspended").and_then(|v| v.as_bool()).unwrap_or(false);
+    let empty: Vec<Value> = Vec::new();
+    let runners = lean.get("runners").and_then(|v| v.as_array()).unwrap_or(&empty);
     let mut sections = Vec::new();
     let mut ocnt = 0usize;
-    let mut all_susp = true;
     let mut srno = 1i64;
-    for o in rows {
-        let s_susp = o.suspended;
-        all_susp = all_susp && s_susp;
-        let size = dec_f64(o.volume);
-        let odds = vec![
-            json!({ "psid": 0, "odds": dec_f64(Some(o.value)), "otype": "back", "oname": "back1", "tno": 0, "size": size }),
-            json!({ "psid": 0, "odds": dec_f64(o.lay), "otype": "lay", "oname": "lay1", "tno": 0, "size": size }),
-        ];
+    for r in runners {
+        let nat = r.get("nat").and_then(|v| v.as_str()).unwrap_or("");
+        let rsusp = msusp || r.get("suspended").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut odds = dx_levels(r.get("back").and_then(|v| v.as_array()), "back", "BACK", rsusp);
+        odds.extend(dx_levels(r.get("lay").and_then(|v| v.as_array()), "lay", "LAY", rsusp));
         ocnt += odds.len();
         sections.push(json!({
             "sid": 0, "psid": 0, "sno": srno, "psrno": srno,
-            "gstatus": if s_susp { "SUSPENDED" } else { "ACTIVE" },
-            "nat": o.outcome, "gscode": if s_susp { 0 } else { 1 },
+            "gstatus": if rsusp { "SUSPENDED" } else { "ACTIVE" },
+            "nat": nat, "gscode": if rsusp { 0 } else { 1 },
             "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
             "odds": odds
         }));
         srno += 1;
     }
-    let susp = !rows.is_empty() && all_susp;
     json!({
         "gmid": gmid, "mid": 0, "pmid": Value::Null, "mname": mname, "rem": "",
-        "gtype": gtype, "status": if susp { "SUSPENDED" } else { "OPEN" },
+        "gtype": gtype, "status": if msusp { "SUSPENDED" } else { "OPEN" },
         "rc": sections.len(), "visible": false, "pid": 0,
-        "gscode": if susp { 0 } else { 1 }, "maxb": 1, "sno": sno, "dtype": 0,
+        "gscode": if msusp { 0 } else { 1 }, "maxb": 1, "sno": sno, "dtype": 0,
         "ocnt": ocnt, "m": 0, "max": 0, "min": 0, "biplay": true, "umaxbof": 0,
-        "boplay": true, "iplay": live, "btcnt": 0, "company": Value::Null,
+        "boplay": true, "iplay": iplay, "btcnt": 0, "company": Value::Null,
         "section": sections
     })
 }
 
-pub(crate) async fn match_detail_d247_core(state: &AppState, client: &ApiClient, provider: &str, gmids: Vec<i64>)
+fn dx_is_match_odds(m: &Value) -> bool {
+    m.get("market").and_then(|v| v.as_str())
+        .map(|s| matches!(s.to_lowercase().as_str(), "match odds" | "match_odds" | "matchodds"))
+        .unwrap_or(false)
+}
+
+// Two empty SUSPENDED runner shells (what d247 shows for a locked-with-no-price
+// event), named from home/away when available.
+fn dx_empty_sections(home: &str, away: &str) -> Value {
+    let shell = |sno: i64, nat: &str| json!({
+        "sid": 0, "psid": 0, "sno": sno, "psrno": sno, "gstatus": "SUSPENDED", "nat": nat,
+        "gscode": 0, "max": 0, "min": 0, "rem": "", "br": false, "ik": 0, "ikm": 0,
+        "odds": [
+            { "odds": 0, "oname": "BACK1", "otype": "BACK", "sid": 0, "tno": 0, "size": 0 },
+            { "odds": 0, "oname": "LAY1", "otype": "LAY", "sid": 0, "tno": 0, "size": 0 }
+        ]
+    });
+    json!([shell(1, home), shell(2, away)])
+}
+
+// Build the list (t1/t2) event object: the Match Odds market's runners as
+// section[], plus the event-level fields.
+fn dx_list_event(r: &DxRow) -> Value {
+    let markets = r.markets.as_array().cloned().unwrap_or_default();
+    let mo = markets.iter().find(|m| dx_is_match_odds(m)).or_else(|| markets.first());
+    let (mname, mut section) = match mo {
+        Some(m) => {
+            let native = dx_native_market(r.gmid, m, 1, r.iplay, r.suspended);
+            let mname = native.get("mname").and_then(|v| v.as_str()).unwrap_or("MATCH_ODDS").to_string();
+            (mname, native.get("section").cloned().unwrap_or_else(|| json!([])))
+        }
+        None => ("MATCH_ODDS".to_string(), json!([])),
+    };
+    if section.as_array().map(|a| a.is_empty()).unwrap_or(true) {
+        section = dx_empty_sections(&r.home, &r.away);
+    }
+    let rc = section.as_array().map(|a| a.len()).unwrap_or(0);
+    json!({
+        "gmid": r.gmid, "ename": r.ename, "etid": r.etid, "cid": r.cid, "cname": r.cname,
+        "iplay": r.iplay, "stime": r.stime.clone().unwrap_or_default(),
+        "tv": false, "bm": false, "f": r.featured, "f1": false, "iscc": 0,
+        "mid": 0, "mname": mname, "status": if r.suspended { "SUSPENDED" } else { "OPEN" },
+        "rc": rc, "gscode": if r.suspended { 0 } else { 1 },
+        "m": 0, "oid": 1, "gtype": "match", "section": section
+    })
+}
+
+const DX_API_INFO: &str =
+    "Real-time exchange data served by ZeroApi from the diamondexch native feed.";
+
+pub(crate) async fn matches_d247_core(state: &AppState, client: &ApiClient, _provider: &str, q: ListQuery)
     -> AppResult<(HeaderMap, Json<Value>)> {
-    require_capability(state, provider, "matches").await?;
+    let limit = q.limit.unwrap_or(500).clamp(1, 1000);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let search = q.search.map(|s| format!("%{}%", s.to_lowercase()));
+    let sql = format!(
+        "SELECT {DX_COLS} FROM diamondexch_events
+         WHERE dead = false
+           AND ($1::int IS NULL OR etid = $1)
+           AND ($2::bigint IS NULL OR cid = $2)
+           AND ($3::text IS NULL OR lower(ename) LIKE $3)
+         ORDER BY iplay DESC, suspended ASC, updated_at DESC
+         LIMIT $4 OFFSET $5"
+    );
+    let rows: Vec<DxRow> = sqlx::query_as(&sql)
+        .bind(q.sport_id.map(|v| v as i32))
+        .bind(q.league_id)
+        .bind(search)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&state.pool)
+        .await?;
+    let (mut t1, mut t2) = (Vec::new(), Vec::new());
+    for r in &rows {
+        let ev = dx_list_event(r);
+        if r.suspended { t2.push(ev) } else { t1.push(ev) }
+    }
+    let body = json!({
+        "success": true, "message": "Success",
+        "data": { "t1": t1, "t2": t2 },
+        "apiInfo": { "provider": "ZeroApi", "website": "https://zeroapi.io",
+            "message": format!("{DX_API_INFO} t1 = open markets, t2 = suspended.") }
+    });
+    Ok((rate_headers(client), Json(body)))
+}
+
+pub(crate) async fn match_detail_d247_core(state: &AppState, client: &ApiClient, _provider: &str, gmids: Vec<i64>)
+    -> AppResult<(HeaderMap, Json<Value>)> {
     if gmids.is_empty() {
         return Err(AppError::BadRequest(
             "matchdetails requires ?gmid=ID (optionally comma-separated), e.g. ?gmid=675117525&sportsid=4".into(),
@@ -451,50 +436,131 @@ pub(crate) async fn match_detail_d247_core(state: &AppState, client: &ApiClient,
     let mut odds_obj = serde_json::Map::new();
     let mut missing: Vec<i64> = Vec::new();
     for id in gmids {
-        let sql = format!("{MATCH_SELECT} WHERE m.provider = $1 AND m.id = $2 AND m.dead = false");
-        let m: Option<MatchView> = sqlx::query_as(&sql)
-            .bind(provider)
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?;
-        let Some(m) = m else {
-            missing.push(id);
-            continue;
-        };
-        let odds: Vec<Odd> = sqlx::query_as("SELECT * FROM odds WHERE match_id = $1 ORDER BY market, id")
-            .bind(id)
-            .fetch_all(&state.pool)
-            .await?;
-        // Group odds by market, preserving first-seen order.
-        let mut order: Vec<String> = Vec::new();
-        let mut groups: std::collections::HashMap<String, Vec<&Odd>> = std::collections::HashMap::new();
-        for o in &odds {
-            if !groups.contains_key(&o.market) {
-                order.push(o.market.clone());
-            }
-            groups.entry(o.market.clone()).or_default().push(o);
-        }
-        let live = m.status == "live";
-        let mut markets = Vec::new();
+        let sql = format!("SELECT {DX_COLS} FROM diamondexch_events WHERE gmid = $1 AND dead = false");
+        let r: Option<DxRow> = sqlx::query_as(&sql).bind(id).fetch_optional(&state.pool).await?;
+        let Some(r) = r else { missing.push(id); continue; };
+        let markets = r.markets.as_array().cloned().unwrap_or_default();
+        let mut out = Vec::new();
         let mut sno = 1i64;
-        for mk in &order {
-            let rows = groups.get(mk).map(|v| v.as_slice()).unwrap_or_default();
-            markets.push(d247_market(id, mk, rows, live, sno));
+        for m in &markets {
+            out.push(dx_native_market(r.gmid, m, sno, r.iplay, r.suspended));
             sno += 1;
         }
-        odds_obj.insert(id.to_string(), Value::Array(markets));
+        odds_obj.insert(id.to_string(), Value::Array(out));
     }
     let body = json!({
-        "success": true,
-        "message": "Success",
+        "success": true, "message": "Success",
         "data": { "odds": Value::Object(odds_obj), "missing_gmids": missing },
-        "apiInfo": {
-            "provider": "ZeroApi",
-            "website": "https://zeroapi.io",
-            "message": "Markets keyed by gmid. data.odds[gmid] = markets, each with section[] runners and back/lay levels."
-        }
+        "apiInfo": { "provider": "ZeroApi", "website": "https://zeroapi.io",
+            "message": "Markets keyed by gmid. data.odds[gmid] = markets, each with section[] runners and back/lay levels." }
     });
     Ok((rate_headers(client), Json(body)))
+}
+
+// ---- diamondexch sports (derived from the events table) ----
+pub(crate) async fn d247_sports_core(state: &AppState, client: &ApiClient)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    let rows: Vec<(i32, String, i64)> = sqlx::query_as(
+        "SELECT etid, max(sport) AS sport, count(*)::bigint AS match_count
+         FROM diamondexch_events WHERE dead = false AND sport <> ''
+         GROUP BY etid ORDER BY match_count DESC, sport ASC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let out = rows
+        .into_iter()
+        .map(|(etid, sport, c)| json!({
+            "id": etid, "etid": etid, "name": sport, "slug": slugify_simple(&sport),
+            "match_count": c, "provider": "diamondexch"
+        }))
+        .collect();
+    Ok((rate_headers(client), Json(out)))
+}
+
+// ---- diamondexch leagues ----
+pub(crate) async fn d247_leagues_core(state: &AppState, client: &ApiClient, sport_id: Option<i64>)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    let rows: Vec<(i64, i32, String, String, i64)> = sqlx::query_as(
+        "SELECT cid, max(etid) AS etid, max(sport) AS sport, max(cname) AS cname, count(*)::bigint AS match_count
+         FROM diamondexch_events
+         WHERE dead = false AND cid <> 0 AND cname <> ''
+           AND ($1::int IS NULL OR etid = $1)
+         GROUP BY cid ORDER BY match_count DESC, cname ASC",
+    )
+    .bind(sport_id.map(|v| v as i32))
+    .fetch_all(&state.pool)
+    .await?;
+    let out = rows
+        .into_iter()
+        .map(|(cid, etid, sport, cname, c)| json!({
+            "id": cid, "sport_id": etid, "sport_name": sport,
+            "name": cname, "country": Value::Null, "match_count": c
+        }))
+        .collect();
+    Ok((rate_headers(client), Json(out)))
+}
+
+// ---- diamondexch sidebar (sports each with their nested leagues) ----
+pub(crate) async fn d247_sidebar_core(state: &AppState, client: &ApiClient)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    let sports: Vec<(i32, String, i64)> = sqlx::query_as(
+        "SELECT etid, max(sport) AS sport, count(*)::bigint AS match_count
+         FROM diamondexch_events WHERE dead = false AND sport <> ''
+         GROUP BY etid ORDER BY match_count DESC, sport ASC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let leagues: Vec<(i32, i64, String, i64)> = sqlx::query_as(
+        "SELECT max(etid) AS etid, cid, max(cname) AS cname, count(*)::bigint AS match_count
+         FROM diamondexch_events WHERE dead = false AND cid <> 0 AND cname <> ''
+         GROUP BY cid ORDER BY match_count DESC, cname ASC",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    let mut by_sport: std::collections::HashMap<i32, Vec<Value>> = std::collections::HashMap::new();
+    for (etid, cid, cname, c) in leagues {
+        by_sport.entry(etid).or_default().push(
+            json!({ "id": cid, "name": cname, "country": Value::Null, "match_count": c }),
+        );
+    }
+    let out = sports
+        .into_iter()
+        .map(|(etid, sport, c)| json!({
+            "id": etid, "etid": etid, "name": sport, "slug": slugify_simple(&sport),
+            "match_count": c, "leagues": by_sport.remove(&etid).unwrap_or_default()
+        }))
+        .collect();
+    Ok((rate_headers(client), Json(out)))
+}
+
+// ---- diamondexch header strip (latest/featured events) ----
+// Prefer events the scraper flagged as the header ticker; then featured; then a
+// per-sport-capped latest set so one busy sport (e.g. table tennis) can't flood
+// the strip. Returns native list events, same shape as /matches t1 entries.
+pub(crate) async fn d247_header_core(state: &AppState, client: &ApiClient)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    let by = |col: &str| format!(
+        "SELECT {DX_COLS} FROM diamondexch_events
+         WHERE dead = false AND {col} = true
+         ORDER BY iplay DESC, updated_at DESC LIMIT 30"
+    );
+    let mut rows: Vec<DxRow> = sqlx::query_as(&by("header")).fetch_all(&state.pool).await?;
+    if rows.is_empty() {
+        rows = sqlx::query_as(&by("featured")).fetch_all(&state.pool).await?;
+    }
+    if rows.is_empty() {
+        // Per-sport-capped latest (max 3 per sport) so no single sport dominates.
+        let fb = format!(
+            "SELECT {DX_COLS} FROM (
+                 SELECT *, row_number() OVER (PARTITION BY etid ORDER BY iplay DESC, updated_at DESC) AS rn
+                 FROM diamondexch_events WHERE dead = false
+             ) t WHERE rn <= 3
+             ORDER BY iplay DESC, updated_at DESC LIMIT 24"
+        );
+        rows = sqlx::query_as(&fb).fetch_all(&state.pool).await?;
+    }
+    let out = rows.iter().map(dx_list_event).collect();
+    Ok((rate_headers(client), Json(out)))
 }
 // ---- match detail ----
 pub(crate) async fn match_detail_core(state: &AppState, client: &ApiClient, provider: &str, id: i64)

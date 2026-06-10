@@ -51,20 +51,20 @@ pub(crate) fn build_sportsbook(slug: &'static str) -> Router<AppState> {
 ///   4. GET /leagues?sport_id=ID
 ///   5. GET /sidebar
 ///   6. GET /headermatches
-pub(crate) fn build_exchange(slug: &'static str) -> Router<AppState> {
+pub(crate) fn build_exchange(_slug: &'static str) -> Router<AppState> {
+    // Every diamondexch endpoint is served from the dedicated `diamondexch_events`
+    // table (native exchange shape), NOT the shared sportsbook matches/odds tables.
     Router::new()
         .route(
             "/sports",
-            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::sports_core(&s, &c, slug).await }),
+            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::d247_sports_core(&s, &c).await }),
         )
-        // Exchange /matches returns the d247 NATIVE envelope: { success, message,
-        // data: { t1 (open), t2 (suspended) }, apiInfo }, each event carrying its
-        // Match Odds runners as section[] with back/lay/size — no second call to
-        // /matchdetails needed for a list view.
+        // /matches → d247 NATIVE envelope: { success, message, data: { t1 (open),
+        // t2 (suspended) }, apiInfo }, each event with its Match Odds section[].
         .route(
             "/matches",
             get(move |State(s): State<AppState>, c: ApiClient, Query(q): Query<v1::ListQuery>| async move {
-                v1::matches_d247_core(&s, &c, slug, q).await
+                v1::matches_d247_core(&s, &c, "diamondexch", q).await
             }),
         )
         // Native matchdetails: ?gmid=ID&sportsid=N (gmid may be comma-separated).
@@ -72,29 +72,29 @@ pub(crate) fn build_exchange(slug: &'static str) -> Router<AppState> {
         .route(
             "/matchdetails",
             get(move |State(s): State<AppState>, c: ApiClient, Query(q): Query<v1::DetailQuery>| async move {
-                v1::match_detail_d247_core(&s, &c, slug, v1::parse_gmids(q.gmid.as_deref())).await
+                v1::match_detail_d247_core(&s, &c, "diamondexch", v1::parse_gmids(q.gmid.as_deref())).await
             }),
         )
         // Path form kept for convenience: /matchdetails/{gmid} → same native shape.
         .route(
             "/matchdetails/:id",
             get(move |State(s): State<AppState>, c: ApiClient, Path(id): Path<i64>| async move {
-                v1::match_detail_d247_core(&s, &c, slug, vec![id]).await
+                v1::match_detail_d247_core(&s, &c, "diamondexch", vec![id]).await
             }),
         )
         .route(
             "/leagues",
             get(move |State(s): State<AppState>, c: ApiClient, Query(q): Query<v1::ListQuery>| async move {
-                v1::leagues_core(&s, &c, slug, q.sport_id).await
+                v1::d247_leagues_core(&s, &c, q.sport_id).await
             }),
         )
         .route(
             "/sidebar",
-            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::sidebar_core(&s, &c, slug).await }),
+            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::d247_sidebar_core(&s, &c).await }),
         )
         .route(
             "/headermatches",
-            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::header_matches_core(&s, &c, slug).await }),
+            get(move |State(s): State<AppState>, c: ApiClient| async move { v1::d247_header_core(&s, &c).await }),
         )
 }
 

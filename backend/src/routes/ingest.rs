@@ -14,7 +14,170 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/snapshot", post(snapshot))
+    Router::new()
+        .route("/snapshot", post(snapshot))
+        // Diamond Exch (d247) has its own native table + ingest shape.
+        .route("/d247", post(d247_snapshot))
+}
+
+// ───────────────────────── Diamond Exch (d247) native ingest ─────────────────
+// The scraper sends events in d247's native exchange shape; we store them in the
+// dedicated `diamondexch_events` table (one row per gmid) verbatim. No mapping
+// into the shared sportsbook schema — that was lossy.
+
+#[derive(Debug, Deserialize)]
+pub struct D247Snapshot {
+    pub source: String,
+    #[serde(default)]
+    pub events: Vec<D247Event>,
+    /// When true, this is the complete current set; events not present are retired
+    /// (subject to `sweep_grace_seconds`, same semantics as the shared snapshot).
+    #[serde(default)]
+    pub sweep: bool,
+    #[serde(default)]
+    pub sweep_grace_seconds: i64,
+    /// gmids to flag featured / header (the highlights + ticker strips). When the
+    /// matching `clear_*` is set, the flag is reset across all events first.
+    #[serde(default)]
+    pub featured_ids: Vec<i64>,
+    #[serde(default)]
+    pub header_ids: Vec<i64>,
+    #[serde(default)]
+    pub clear_featured: bool,
+    #[serde(default)]
+    pub clear_header: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct D247Event {
+    pub gmid: i64,
+    #[serde(default)]
+    pub etid: i32,
+    #[serde(default)]
+    pub sport: String,
+    #[serde(default)]
+    pub cid: i64,
+    #[serde(default)]
+    pub cname: String,
+    pub ename: String,
+    #[serde(default)]
+    pub home: String,
+    #[serde(default)]
+    pub away: String,
+    #[serde(default)]
+    pub iplay: bool,
+    #[serde(default)]
+    pub stime: Option<String>,
+    #[serde(default)]
+    pub suspended: bool,
+    #[serde(default)]
+    pub featured: bool,
+    #[serde(default)]
+    pub header: bool,
+    /// Lean native markets (see migration 0026). Stored as-is.
+    #[serde(default)]
+    pub markets: Value,
+}
+
+async fn d247_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(snap): Json<D247Snapshot>,
+) -> AppResult<Json<Value>> {
+    let key = headers.get("x-ingest-key").and_then(|v| v.to_str().ok()).unwrap_or("");
+    if key != state.config.ingest_key {
+        return Err(AppError::Unauthorized);
+    }
+
+    let mut tx = state.pool.begin().await?;
+
+    if snap.clear_featured {
+        sqlx::query("UPDATE diamondexch_events SET featured = false")
+            .execute(&mut *tx)
+            .await?;
+    }
+    if snap.clear_header {
+        sqlx::query("UPDATE diamondexch_events SET header = false")
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    let mut seen: Vec<i64> = Vec::with_capacity(snap.events.len());
+    for e in &snap.events {
+        seen.push(e.gmid);
+        let markets = if e.markets.is_null() { json!([]) } else { e.markets.clone() };
+        sqlx::query(
+            "INSERT INTO diamondexch_events
+                (gmid, etid, sport, cid, cname, ename, home, away, iplay, stime,
+                 suspended, featured, header, markets, source, dead, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,false, now())
+             ON CONFLICT (gmid) DO UPDATE SET
+                etid = EXCLUDED.etid, sport = EXCLUDED.sport,
+                cid = EXCLUDED.cid, cname = EXCLUDED.cname, ename = EXCLUDED.ename,
+                home = EXCLUDED.home, away = EXCLUDED.away, iplay = EXCLUDED.iplay,
+                stime = COALESCE(EXCLUDED.stime, diamondexch_events.stime),
+                suspended = EXCLUDED.suspended,
+                -- featured/header: keep sticky within a pass; the clear_* above
+                -- resets them so the per-pass flag sets are authoritative.
+                featured = (diamondexch_events.featured OR EXCLUDED.featured),
+                header   = (diamondexch_events.header   OR EXCLUDED.header),
+                markets = EXCLUDED.markets, source = EXCLUDED.source,
+                dead = false, updated_at = now()",
+        )
+        .bind(e.gmid)
+        .bind(e.etid)
+        .bind(&e.sport)
+        .bind(e.cid)
+        .bind(&e.cname)
+        .bind(&e.ename)
+        .bind(&e.home)
+        .bind(&e.away)
+        .bind(e.iplay)
+        .bind(&e.stime)
+        .bind(e.suspended)
+        .bind(e.featured)
+        .bind(e.header)
+        .bind(&markets)
+        .bind(&snap.source)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    if !snap.featured_ids.is_empty() {
+        sqlx::query("UPDATE diamondexch_events SET featured = true WHERE gmid = ANY($1)")
+            .bind(&snap.featured_ids)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if !snap.header_ids.is_empty() {
+        sqlx::query("UPDATE diamondexch_events SET header = true WHERE gmid = ANY($1)")
+            .bind(&snap.header_ids)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // Retire events no longer present (grace-aware, like the shared snapshot).
+    if snap.sweep && !seen.is_empty() {
+        if snap.sweep_grace_seconds > 0 {
+            sqlx::query(
+                "UPDATE diamondexch_events SET dead = true
+                 WHERE dead = false AND gmid <> ALL($1)
+                   AND updated_at < now() - make_interval(secs => $2)",
+            )
+            .bind(&seen)
+            .bind(snap.sweep_grace_seconds as f64)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query("UPDATE diamondexch_events SET dead = true WHERE dead = false AND gmid <> ALL($1)")
+                .bind(&seen)
+                .execute(&mut *tx)
+                .await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(Json(json!({ "ok": true, "events": snap.events.len() })))
 }
 
 #[derive(Debug, Deserialize)]

@@ -245,7 +245,6 @@ HEADER_JS = r"""
 }
 """
 
-OUTCOME = {"1": "W1", "X": "Draw", "2": "W2"}
 # Team separators in priority order: " v "/" vs "/" @ " (real matches),
 # then " - " (esports / virtual "Team (e) - Team" format).
 SEPARATORS = [" v ", " vs ", " @ ", " - "]
@@ -308,6 +307,111 @@ def event_id_from_href(href):
     """Last numeric segment of /game-details/{etid}/{id} (etc.) → stable ext_id."""
     nums = re.findall(r"/(\d+)", href or "")
     return int(nums[-1]) if nums else None
+
+
+def etid_from_href(href):
+    """First numeric segment of /game-details/{etid}/{id} → sport/event-type id."""
+    nums = re.findall(r"/(\d+)", href or "")
+    return int(nums[0]) if len(nums) >= 2 else None
+
+
+def sport_etid(sport):
+    """Fallback sport→etid map when the href doesn't carry it (d247 ids)."""
+    s = (sport or "").lower()
+    if "cricket" in s:
+        return 4
+    if "table" in s and "tennis" in s:
+        return 8
+    if "tennis" in s:
+        return 2
+    if "soccer" in s or "football" in s:
+        return 1
+    return 0
+
+
+def to_native_event(m):
+    """Convert an internal match dict (build_match/build_event output) into a d247
+    NATIVE event for the dedicated diamondexch_events table: event header + lean
+    markets [{ market, gtype, suspended, runners:[{nat,suspended,back,lay}] }].
+    Each market's runners group the internal odds rows by outcome (team/runner),
+    with back/lay as ascending price LEVELS [{odds,size}]."""
+    gmid = m.get("ext_id")
+    if gmid is None:
+        return None  # no stable id → can't key the native row
+    href = m.get("_href") or ""
+    etid = etid_from_href(href) or sport_etid(m.get("sport"))
+    home = m.get("home") or ""
+    away = m.get("away") or ""
+    ename = f"{home} v {away}" if away else home
+
+    order, groups = [], {}
+    for o in m.get("markets", []):
+        mk = o.get("market") or "Match Odds"
+        if mk not in groups:
+            groups[mk] = {}
+            order.append(mk)
+        nat = o.get("outcome") or ""
+        r = groups[mk].get(nat)
+        if r is None:
+            r = {"nat": nat, "suspended": False, "back": [], "lay": []}
+            groups[mk][nat] = r
+        back, lay, size = o.get("value"), o.get("lay"), o.get("volume")
+        if back is not None and back >= 1.0:
+            r["back"].append({"odds": back, "size": size or 0})
+        if lay is not None and lay >= 1.0:
+            r["lay"].append({"odds": lay, "size": size or 0})
+        if o.get("suspended"):
+            r["suspended"] = True
+
+    markets = []
+    for mk in order:
+        runners = list(groups[mk].values())
+        msusp = bool(runners) and all(rr["suspended"] for rr in runners)
+        gtype = "fancy1" if ("fancy" in mk.lower() or "session" in mk.lower()) else "match"
+        markets.append({"market": mk, "gtype": gtype, "suspended": msusp, "runners": runners})
+
+    return {
+        "gmid": gmid, "etid": etid, "sport": m.get("sport") or "",
+        "cid": 0, "cname": m.get("league") or "",
+        "ename": ename, "home": home, "away": away,
+        "iplay": m.get("status") == "live",
+        "stime": m.get("time"),
+        "suspended": bool(m.get("suspended")),
+        "featured": bool(m.get("featured")),
+        "header": False,
+        "markets": markets,
+    }
+
+
+async def post_d247(client, source, matches, sweep=False, featured_ids=None,
+                    header_ids=None, clear_featured=False, clear_header=False):
+    """POST events to the dedicated d247 native ingest (/api/ingest/d247), which
+    stores them in `diamondexch_events`. The public diamondexch API reads ONLY
+    this table; we still also POST the shared snapshot (post_snapshot) so the
+    admin dashboard keeps working. Returns the number of events sent."""
+    events = [e for e in (to_native_event(m) for m in matches) if e]
+    payload = {
+        "source": source, "events": events, "sweep": sweep,
+        "sweep_grace_seconds": SWEEP_GRACE_SECONDS if sweep else 0,
+    }
+    if featured_ids is not None:
+        payload["featured_ids"] = featured_ids
+        payload["clear_featured"] = clear_featured
+    if header_ids is not None:
+        payload["header_ids"] = header_ids
+        payload["clear_header"] = clear_header
+    try:
+        r = await client.post(
+            f"{BACKEND_URL}/api/ingest/d247",
+            headers={"X-Ingest-Key": INGEST_KEY},
+            json=payload,
+            timeout=30,
+        )
+        r.raise_for_status()
+        return len(events)
+    except Exception as e:
+        print(f"  d247 POST failed ({source}): {e}", file=sys.stderr)
+        return 0
 
 
 def split_teams(name):
@@ -380,11 +484,17 @@ def build_match(card, sport):
     backs = card.get("backs") or []
     lays = card.get("lays") or []
     col_susp = card.get("colSusp") or []
+    # The list 1/X/2 columns ARE the exchange Match Odds market. Store them under
+    # "Match Odds" with the TEAM NAME as the outcome (1→home, 2→away, X→Draw), so
+    # (a) the API's native Match-Odds sections pick them up — without this every
+    # prematch match renders locked — and (b) list odds dedupe cleanly with the
+    # detail page's Match Odds (which also uses team names as runners).
+    label_to_nat = {"1": home, "2": away, "X": "Draw"}
     markets = []
     for i, b in enumerate(backs):
         label = labels[i] if i < len(labels) else None
-        outcome = OUTCOME.get(label)
-        if not outcome:
+        nat = label_to_nat.get(label)
+        if not nat:
             continue
         lay = lays[i] if i < len(lays) else None
         cell_susp = susp or (bool(col_susp[i]) if i < len(col_susp) else False)
@@ -393,7 +503,7 @@ def build_match(card, sport):
         if (b is None or b < 1.0) and (lay is None or lay < 1.0) and not cell_susp:
             continue
         markets.append({
-            "market": "Match Result", "outcome": outcome,
+            "market": "Match Odds", "outcome": nat,
             "value": round(float(b), 3) if (b is not None and b >= 1.0) else 0,
             "lay": round(float(lay), 3) if (lay is not None and lay >= 1.0) else None,
             "volume": None, "param": None, "suspended": cell_susp,
@@ -730,6 +840,9 @@ async def scrape_featured(client, page):
             timeout=30,
         )
         r.raise_for_status()
+        # Native d247 table: upsert any special shells + flag featured by id.
+        await post_d247(client, "d247-featured", shells,
+                        featured_ids=ids, clear_featured=True)
         print(f"  featured: {len(ids)} flagged, {len(shells)} special-market shells")
         return len(ids) + len(shells)
     except Exception as e:
@@ -764,6 +877,8 @@ async def scrape_header(client, page):
             timeout=30,
         )
         r.raise_for_status()
+        # Native d247 table: flag header matches by id.
+        await post_d247(client, "d247-header", [], header_ids=ids, clear_header=True)
         print(f"  header: {len(ids)} matches flagged")
         return len(ids)
     except Exception as e:
@@ -845,7 +960,9 @@ async def scrape_sport(client, page, idx, sport):
             if m.get("_href") and (m["status"] == "live" or m.get("_event"))]
     # Full list for this sport → sweep: retire matches in this sport that are
     # no longer listed (so the next API response shows only the current set).
-    mm, oo = await post_snapshot(client, f"d247-{sport.lower().replace(' ', '-')}", matches, sweep=True)
+    src = f"d247-{sport.lower().replace(' ', '-')}"
+    mm, oo = await post_snapshot(client, src, matches, sweep=True)   # shared (admin)
+    await post_d247(client, src, matches, sweep=True)               # native d247 table
     print(f"  [{sport}] {len(matches)} matches → {mm} upserted, {oo} odds ({len(live)} live)")
     return mm, oo, live
 
@@ -885,7 +1002,9 @@ async def enrich_detail(client, page, idx, sport, m):
         pass
     changed = merge_detail(m, detail)
     if changed:
-        await post_snapshot(client, f"d247-{sport.lower().replace(' ', '-')}-detail", [m])
+        src = f"d247-{sport.lower().replace(' ', '-')}-detail"
+        await post_snapshot(client, src, [m])   # shared (admin)
+        await post_d247(client, src, [m])        # native d247 table (full markets)
     # Return to the list view for the next enrichment.
     try:
         await page.go_back(wait_until="domcontentloaded")
