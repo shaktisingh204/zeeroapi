@@ -1281,9 +1281,17 @@ async def scrape_sport(client, page, idx, sport):
               if D247_ADMIN_SNAPSHOT else (0, 0))
     # The d247 NATIVE table is fed from the JSON.parse capture (full fidelity:
     # cname/cid/mid/sid/size/ladders) collected NOW for THIS sport.
+    bufn = await native_buffer_size(page)
     nat = await collect_and_post_native_sport(client, page, sport)
+    # FALLBACK: if the native capture saw nothing (e.g. d247 decrypts in a Web
+    # Worker our main-thread hook can't observe), feed diamondexch_events from the
+    # DOM matches we already scraped — Match Odds still get to the public API.
+    src_used = "native"
+    if nat == 0 and matches:
+        nat = await post_d247(client, src, matches, sweep=True)
+        src_used = "dom"
     print(f"  [{sport}] {len(matches)} matches → {mm} upserted, {oo} odds "
-          f"({len(live)} live, {nat} native)")
+          f"({len(live)} live, {nat} {src_used}, buf={bufn})")
     return mm, oo, live
 
 
@@ -1544,6 +1552,60 @@ async def await_native(page, deadline_s=4.0):
     return False
 
 
+async def native_buffer_size(page):
+    """How many match rows are currently sitting in the captured native buffer.
+    -1 on error. Used for diagnostics: if this is persistently 0 the JSON.parse
+    hook is not seeing d247's decrypted payloads (e.g. decryption moved to a Web
+    Worker) and we must fall back to the DOM."""
+    try:
+        return await page.evaluate(
+            "() => (window.__dxlist||[]).reduce("
+            "(a,p)=>a+((p.t1||[]).length+(p.t2||[]).length),0)")
+    except Exception:
+        return -1
+
+
+async def harvest_dom_matches(page, sport, max_steps=12):
+    """Scroll-extract the virtualized list into match dicts via the DOM (EXTRACT_JS).
+    Bounded + lighter than the full-pass sweep. This is the RELIABLE feed when the
+    native JSON.parse capture comes back empty — the rows always render even when
+    we can't see the decrypted API payload."""
+    seen = {}
+
+    def absorb(cards):
+        for c in cards or []:
+            m = build_match(c, sport)
+            if m:
+                key = m.get("_href") or (m["home"], m["away"])
+                seen[key] = m
+
+    try:
+        await page.evaluate(SCROLL_JS, -200000)  # jump to top
+        await page.wait_for_timeout(200)
+    except Exception:
+        pass
+    stale = 0
+    for _ in range(max_steps):
+        try:
+            absorb(await page.evaluate(EXTRACT_JS))
+        except Exception:
+            pass
+        before = len(seen)
+        try:
+            await page.evaluate(SCROLL_JS, 900)
+        except Exception:
+            pass
+        await page.wait_for_timeout(150)
+        stale = 0 if len(seen) > before else stale + 1
+        if stale >= 3:
+            break
+    try:
+        absorb(await page.evaluate(EXTRACT_JS))
+    except Exception:
+        pass
+    return list(seen.values())
+
+
 async def park_tab(page, idx):
     """Click the idx-th sport tab once so the SPA starts polling that sport's
     (encrypted) list endpoint. Resilient to a re-appearing banner and to the page
@@ -1582,7 +1644,16 @@ async def scrape_sport_native(client, page, idx, sport):
     if not await park_tab(page, idx):
         return 0
     await await_native(page)
-    return await collect_and_post_native_sport(client, page, sport)
+    events = await collect_native_sport_events(page, sport)
+    if events:
+        return await post_native_sport_events(client, sport, events)
+    # Native capture empty → fall back to the DOM (rows still render). This keeps
+    # diamondexch_events fed (Match Odds) even when the JSON.parse hook is blind.
+    matches = await harvest_dom_matches(page, sport, max_steps=10)
+    if matches:
+        return await post_d247(client, f"d247-{sport.lower().replace(' ', '-')}",
+                               matches, sweep=True)
+    return 0
 
 
 # ── Streaming workers: parked tabs + continuous drain ───────────────────────────
