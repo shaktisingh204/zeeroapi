@@ -3,9 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
-  Activity,
-  Check,
-  Copy,
   ArrowRight,
   KeyRound,
   Gauge,
@@ -24,6 +21,8 @@ import {
   type PublicProvider,
   type PublicPlan,
 } from "@/lib/landing";
+import { PROVIDER_DOCS } from "@/lib/docsContent";
+import { CodeBlock, DocsHeader, MethodBadge, RequestTabs } from "./ui";
 
 /* ============================================================ provider model */
 // Static capability + type fallback (merged with whatever the live API reports).
@@ -56,89 +55,6 @@ function mergeProviders(api: PublicProvider[]): Prov[] {
     const type: "sportsbook" | "exchange" = caps.includes("exchange") || slug === "diamondexch" ? "exchange" : meta.type;
     return { slug, name: live?.name ?? meta.name, type, caps };
   });
-}
-
-/* ============================================================ shared UI bits */
-
-function CopyButton({ text, light = false }: { text: string; light?: boolean }) {
-  const [done, setDone] = useState(false);
-  return (
-    <button
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text);
-          setDone(true);
-          setTimeout(() => setDone(false), 1400);
-        } catch {
-          /* clipboard blocked */
-        }
-      }}
-      className={`inline-flex h-7 w-7 items-center justify-center rounded-lg transition-all duration-150 active:scale-[0.92] ${
-        light
-          ? "text-slate-400 hover:bg-slate-100 hover:text-slate-700"
-          : "text-slate-400 hover:bg-white/10 hover:text-white"
-      }`}
-      aria-label="Copy to clipboard"
-    >
-      {done ? <Check size={14} className="text-emerald-500" /> : <Copy size={14} />}
-    </button>
-  );
-}
-
-function CodeBlock({ code, label }: { code: string; label?: string }) {
-  return (
-    <div className="overflow-hidden rounded-2xl border border-slate-800 bg-[#0d1117]">
-      <div className="flex items-center justify-between border-b border-white/10 px-3.5 py-2">
-        <span className="font-mono text-[11px] uppercase tracking-[0.14em] text-slate-500">{label ?? "shell"}</span>
-        <CopyButton text={code} />
-      </div>
-      <pre className="overflow-x-auto px-4 py-3.5 text-[13px] leading-relaxed">
-        <code className="font-mono text-slate-200 whitespace-pre">{code}</code>
-      </pre>
-    </div>
-  );
-}
-
-const LANGS = ["curl", "javascript", "python"] as const;
-type Lang = (typeof LANGS)[number];
-const LANG_LABEL: Record<Lang, string> = { curl: "cURL", javascript: "JavaScript", python: "Python" };
-
-function RequestTabs({ path }: { path: string }) {
-  const [lang, setLang] = useState<Lang>("curl");
-  const url = `${API_V1}${path}`;
-  const snippets: Record<Lang, string> = {
-    curl: `curl -H "X-API-Key: $ZEROAPI_KEY" \\\n  "${url}"`,
-    javascript: `const res = await fetch("${url}", {\n  headers: { "X-API-Key": process.env.ZEROAPI_KEY },\n});\nconst data = await res.json();`,
-    python: `import os, httpx\n\nr = httpx.get(\n    "${url}",\n    headers={"X-API-Key": os.environ["ZEROAPI_KEY"]},\n)\ndata = r.json()`,
-  };
-  return (
-    <div>
-      <div className="mb-2 flex gap-1.5">
-        {LANGS.map((l) => (
-          <button
-            key={l}
-            onClick={() => setLang(l)}
-            className={`rounded-full px-3 py-1 text-xs font-semibold transition-all duration-150 active:scale-[0.97] ${
-              lang === l
-                ? "bg-slate-900 text-white"
-                : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-            }`}
-          >
-            {LANG_LABEL[l]}
-          </button>
-        ))}
-      </div>
-      <CodeBlock code={snippets[lang]} label={LANG_LABEL[lang]} />
-    </div>
-  );
-}
-
-function MethodBadge() {
-  return (
-    <span className="rounded-md bg-emerald-50 px-2 py-0.5 font-mono text-[11px] font-bold tracking-wide text-emerald-600">
-      GET
-    </span>
-  );
 }
 
 /* ============================================================ endpoint model */
@@ -489,7 +405,7 @@ const ERRORS: [string, string][] = [
 
 /* ============================================================ sidebar nav */
 
-const NAV_GROUPS: { title: string; items: { id: string; label: string; mono?: boolean }[] }[] = [
+const NAV_GROUPS: { title: string; items: { id: string; label: string; mono?: boolean; href?: string }[] }[] = [
   {
     title: "Getting started",
     items: [
@@ -500,7 +416,10 @@ const NAV_GROUPS: { title: string; items: { id: string; label: string; mono?: bo
   },
   {
     title: "Providers",
-    items: [{ id: "providers", label: "All providers" }],
+    items: [
+      { id: "providers", label: "All providers" },
+      ...PROVIDER_DOCS.map((d) => ({ id: `pv-${d.slug}`, label: d.name, href: `/docs/${d.slug}` })),
+    ],
   },
   {
     title: "Endpoints",
@@ -573,35 +492,7 @@ export default function DocsPage() {
   return (
     <div style={{ colorScheme: "light" }} className="min-h-screen bg-[#fbfcff] font-sans text-slate-700 antialiased">
       {/* ---------------- Top nav ---------------- */}
-      <header className="sticky top-0 z-40 border-b border-slate-200/70 bg-white/85 backdrop-blur-md">
-        <div className="mx-auto flex h-16 max-w-[1280px] items-center justify-between px-5">
-          <Link href="/" className="flex items-center gap-2.5">
-            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-500 shadow-[0_6px_16px_-6px_rgba(16,185,129,0.8)]">
-              <Activity size={18} className="text-white" />
-            </span>
-            <span className="text-[17px] font-bold tracking-tight text-slate-900">ZeroApi</span>
-            <span className="hidden text-sm font-medium text-slate-400 sm:inline">API Reference</span>
-          </Link>
-          <div className="flex items-center gap-5 text-sm font-medium">
-            <Link href="/status" className="hidden text-slate-500 transition-colors hover:text-slate-900 sm:inline">Status</Link>
-            <Link href="/changelog" className="hidden text-slate-500 transition-colors hover:text-slate-900 sm:inline">Changelog</Link>
-            <a
-              href={`${API_V1}/docs`}
-              target="_blank"
-              rel="noreferrer"
-              className="hidden text-slate-500 transition-colors hover:text-slate-900 md:inline"
-            >
-              OpenAPI
-            </a>
-            <Link
-              href="/signup"
-              className="inline-flex items-center gap-2 rounded-full bg-emerald-500 px-4 py-2 text-sm font-semibold text-white shadow-[0_10px_30px_-10px_rgba(16,185,129,0.7)] transition-all duration-150 hover:bg-emerald-600 active:scale-[0.97]"
-            >
-              Get API key <ArrowRight size={15} />
-            </Link>
-          </div>
-        </div>
-      </header>
+      <DocsHeader />
 
       <div className="mx-auto flex max-w-[1280px] gap-10 px-5">
         {/* ---------------- Sidebar ---------------- */}
@@ -615,18 +506,19 @@ export default function DocsPage() {
                 <div className="space-y-0.5">
                   {group.items.map((item) => {
                     const on = activeId === item.id;
-                    return (
-                      <a
-                        key={item.id}
-                        href={`#${item.id}`}
-                        className={`block rounded-lg px-3 py-1.5 text-sm transition-colors ${
-                          item.mono ? "font-mono text-[12.5px]" : ""
-                        } ${
-                          on
-                            ? "bg-emerald-50 font-semibold text-emerald-700"
-                            : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                        }`}
-                      >
+                    const cls = `block rounded-lg px-3 py-1.5 text-sm transition-colors ${
+                      item.mono ? "font-mono text-[12.5px]" : ""
+                    } ${
+                      on
+                        ? "bg-emerald-50 font-semibold text-emerald-700"
+                        : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+                    }`;
+                    return item.href ? (
+                      <Link key={item.id} href={item.href} className={cls}>
+                        {item.label}
+                      </Link>
+                    ) : (
+                      <a key={item.id} href={`#${item.id}`} className={cls}>
                         {item.label}
                       </a>
                     );
@@ -731,26 +623,45 @@ export default function DocsPage() {
               matched volume, and lock markets in-play.
             </p>
             <div className="grid gap-3 sm:grid-cols-2">
-              {providers.map((p) => (
-                <div key={p.slug} className="rounded-2xl border border-slate-200 bg-white p-4">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900">{p.name}</span>
-                    <span
-                      className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
-                        p.type === "exchange" ? "bg-violet-50 text-violet-600" : "bg-emerald-50 text-emerald-600"
-                      }`}
-                    >
-                      {p.type}
-                    </span>
-                  </div>
-                  <code className="mt-0.5 block font-mono text-[12.5px] text-slate-400">{p.slug}</code>
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {p.caps.map((c) => (
-                      <span key={c} className="rounded-md bg-slate-100 px-2 py-0.5 font-mono text-[11px] text-slate-600">{c}</span>
-                    ))}
-                  </div>
-                </div>
-              ))}
+              {providers.map((p) => {
+                const hasDocs = PROVIDER_DOCS.some((d) => d.slug === p.slug);
+                const card = (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-slate-900">{p.name}</span>
+                      <span
+                        className={`rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
+                          p.type === "exchange" ? "bg-violet-50 text-violet-600" : "bg-emerald-50 text-emerald-600"
+                        }`}
+                      >
+                        {p.type}
+                      </span>
+                    </div>
+                    <code className="mt-0.5 block font-mono text-[12.5px] text-slate-400">{p.slug}</code>
+                    <div className="mt-3 flex flex-wrap gap-1.5">
+                      {p.caps.map((c) => (
+                        <span key={c} className="rounded-md bg-slate-100 px-2 py-0.5 font-mono text-[11px] text-slate-600">{c}</span>
+                      ))}
+                    </div>
+                    {hasDocs && (
+                      <p className="mt-3 inline-flex items-center gap-1 text-sm font-semibold text-emerald-600">
+                        View full docs <ArrowRight size={14} />
+                      </p>
+                    )}
+                  </>
+                );
+                return hasDocs ? (
+                  <Link
+                    key={p.slug}
+                    href={`/docs/${p.slug}`}
+                    className="group rounded-2xl border border-slate-200 bg-white p-4 transition-all duration-150 hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md"
+                  >
+                    {card}
+                  </Link>
+                ) : (
+                  <div key={p.slug} className="rounded-2xl border border-slate-200 bg-white p-4">{card}</div>
+                );
+              })}
             </div>
           </section>
 
