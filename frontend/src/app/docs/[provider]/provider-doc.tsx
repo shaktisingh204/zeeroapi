@@ -250,7 +250,7 @@ export default function ProviderDocPage({ slug }: { slug: string }) {
               Authenticate with the{" "}
               <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[12.5px] text-emerald-700">X-API-Key</code>{" "}
               header. {exchange
-                ? "Start with the matches list, then pull a match's odds from /matchdetails — that is where the back/lay prices live."
+                ? "One call to /matches gives you renderable rows: every match arrives with its back/lay prices, matched volume and lock status embedded."
                 : "This call returns everything currently in play on " + doc.name + "."}
             </p>
             <RequestTabs path={exchange ? `/${doc.slug}/matches?status=live` : `/${doc.slug}/live`} />
@@ -271,7 +271,7 @@ export default function ProviderDocPage({ slug }: { slug: string }) {
             </div>
             <p className="max-w-[62ch] text-slate-600">
               {exchange
-                ? `${doc.name} exposes exactly ${doc.endpoints.length} endpoints. There is no separate odds endpoint — prices arrive inside /matchdetails together with the suspension state.`
+                ? `${doc.name} exposes exactly ${doc.endpoints.length} endpoints. There is no separate odds endpoint — /matches embeds every row's odds and lock status, and /matchdetails returns the same for one match.`
                 : `${doc.name} exposes ${doc.endpoints.length} endpoints. Sample responses below use real shapes from this provider's feed.`}
             </p>
           </section>

@@ -52,6 +52,15 @@ pub struct Snapshot {
     /// Set this only on a full list sweep, never on a partial/detail snapshot.
     #[serde(default)]
     pub sweep: bool,
+    /// Grace period (seconds) for the dead-sweep. When > 0, a match missing from
+    /// this snapshot is retired only if it has not been re-scraped for at least
+    /// this long — so a single missed/incomplete pass does NOT drop a match that
+    /// is still listed on the source site (it keeps being re-upserted with a
+    /// fresh updated_at). 0 (default) = retire immediately, the old behavior.
+    /// Scrapers whose list is scroll-virtualized (d247) set this to ride out
+    /// passes that only captured part of the list.
+    #[serde(default)]
+    pub sweep_grace_seconds: i64,
 }
 
 fn default_provider() -> String {
@@ -372,16 +381,35 @@ async fn snapshot(
     // matches are never swept (they belong in /results).
     if snap.sweep && !seen_ids.is_empty() && !seen_sports.is_empty() {
         let sports: Vec<i64> = seen_sports.iter().copied().collect();
-        sqlx::query(
-            "UPDATE matches SET dead = true
-             WHERE provider = $1 AND sport_id = ANY($2) AND id <> ALL($3)
-               AND dead = false AND status <> 'finished'",
-        )
-        .bind(provider)
-        .bind(&sports)
-        .bind(&seen_ids)
-        .execute(&mut *tx)
-        .await?;
+        if snap.sweep_grace_seconds > 0 {
+            // Grace-based retirement: only drop a missing match once it has gone
+            // un-scraped for the grace window. Matches still on the source are
+            // re-upserted each pass (updated_at bumped), so they never age out —
+            // exactly "keep showing it until it's actually gone from the site".
+            sqlx::query(
+                "UPDATE matches SET dead = true
+                 WHERE provider = $1 AND sport_id = ANY($2) AND id <> ALL($3)
+                   AND dead = false AND status <> 'finished'
+                   AND updated_at < now() - make_interval(secs => $4)",
+            )
+            .bind(provider)
+            .bind(&sports)
+            .bind(&seen_ids)
+            .bind(snap.sweep_grace_seconds as f64)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE matches SET dead = true
+                 WHERE provider = $1 AND sport_id = ANY($2) AND id <> ALL($3)
+                   AND dead = false AND status <> 'finished'",
+            )
+            .bind(provider)
+            .bind(&sports)
+            .bind(&seen_ids)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     // Catalog the full sports-tree / sidebar (sports + leagues with no current

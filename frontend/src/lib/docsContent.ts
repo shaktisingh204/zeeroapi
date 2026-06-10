@@ -396,10 +396,10 @@ const SEEDS: Seed[] = [
     about: [
       "Diamond Exch (d247) is the one exchange on the platform, and its data shape is fundamentally different from every sportsbook here. Each runner quotes a back price, a lay price and the matched volume behind it, and whole markets lock (suspend) the moment a ball is bowled or a goal goes in.",
       "Coverage is cricket-first — Match Odds, Bookmaker and Fancy (session) markets on every televised game — with football and tennis exchanges alongside. The site is a heavily protected SPA, so the feed is produced by Playwright rendering the real app and reading its DOM.",
-      "The endpoint surface is deliberately small: six endpoints, and odds are only delivered inside /matchdetails/{id} — there is no separate odds endpoint, because on an exchange the prices are meaningless without the suspension state that travels with the match.",
+      "The endpoint surface is deliberately small: six endpoints, and there is no separate odds endpoint, because on an exchange the prices are meaningless without the suspension state that travels with the match. Instead, /matches embeds every row's full odds — back, lay, volume and suspended — and /matchdetails/{id} returns the same for one match.",
     ],
     quirks: [
-      "Odds live ONLY inside /matchdetails/{id} — there is no /odds or /markets endpoint on this provider.",
+      "/matches pushes everything the scraper captured: each row embeds its odds (back/lay/volume) and lock status, so a list view needs no follow-up calls. There is no /odds or /markets endpoint on this provider.",
       "Bookmaker and Fancy prices are quoted in exchange ticks (e.g. 78/82), not decimal odds — divide by 100 and add 1 to convert.",
       "Fancy markets are cricket session lines: the outcome is the line description, value/lay are the run brackets.",
       "suspended flips constantly in-play; always render it, never cache through it.",
@@ -481,7 +481,9 @@ function buildEndpoints(s: Seed): DocEndpoint[] {
   add(
     "matches",
     "/matches",
-    "Matches and events (prematch + live), live first. Filterable and paginated.",
+    s.kind === "exchange"
+      ? "Matches and events, live first — and on this exchange every row embeds everything the scraper captured: the full odds set (back, lay, volume) plus per-runner and match-level suspended flags. One call gives you a renderable list."
+      : "Matches and events (prematch + live), live first. Filterable and paginated.",
     [
       P(s.slug),
       { name: "status", loc: "query", desc: "live · prematch · finished" },
@@ -491,7 +493,14 @@ function buildEndpoints(s: Seed): DocEndpoint[] {
       { name: "limit", loc: "query", desc: "1–500, default 50." },
       { name: "offset", loc: "query", desc: "Pagination offset." },
     ],
-    `[\n${matchRow(s, "live")}\n]`,
+    s.kind === "exchange"
+      ? `[
+  {
+${matchFields(s, "live", "  ")},
+    "odds": ${s.oddsRows.replace(/\n/g, "\n    ")}
+  }
+]`
+      : `[\n${matchRow(s, "live")}\n]`,
     `/matches?status=live&sport_id=${s.sport.id}`,
   );
 

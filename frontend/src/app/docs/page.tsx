@@ -188,7 +188,8 @@ const ENDPOINTS: Endpoint[] = [
     id: "ep-matches",
     display: "/v1/{provider}/matches",
     template: "/{provider}/matches?status=live&limit=20",
-    summary: "List matches and events (prematch + live), live first. Supports filtering and pagination.",
+    summary:
+      "List matches and events (prematch + live), live first. Supports filtering and pagination. On exchange providers every row also embeds its full odds (back/lay/volume) and lock status.",
     capability: "matches",
     params: [
       { name: "provider", loc: "path", required: true, desc: "Provider slug." },
@@ -199,7 +200,25 @@ const ENDPOINTS: Endpoint[] = [
       { name: "limit", loc: "query", desc: "1 to 500 (default 50)." },
       { name: "offset", loc: "query", desc: "Pagination offset." },
     ],
-    response: (slug, exch) => matchListEx(slug, exch),
+    response: (slug, exch) =>
+      exch
+        ? `[
+  {
+    "id": 884213,
+    "provider": "${slug}",
+    "sport_name": "Cricket",
+    "league_name": "Indian Premier League",
+    "home_team": "Mumbai Indians",
+    "away_team": "Chennai Super Kings",
+    "status": "live",
+    "match_time": "MI 142/3 (15.3)",
+    "suspended": false,
+    "featured": true,
+    "updated_at": "2026-06-09T14:00:00Z",
+    "odds": ${oddsEx(slug, true).replace(/\n/g, "\n    ")}
+  }
+]`
+        : matchListEx(slug, false),
   },
   {
     id: "ep-match",

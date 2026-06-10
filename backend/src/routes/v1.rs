@@ -217,6 +217,39 @@ pub(crate) async fn matches_core(state: &AppState, client: &ApiClient, provider:
         .await?;
     Ok((rate_headers(client), Json(rows)))
 }
+// ---- matches (list) WITH embedded odds — exchange (d247/diamondexch) shape.
+// An exchange match row is meaningless without its prices, so every row carries
+// the full odds set the scraper captured: back `value`, `lay`, matched `volume`
+// and the per-runner `suspended` flag, alongside the match-level lock status.
+pub(crate) async fn matches_with_odds_core(state: &AppState, client: &ApiClient, provider: &str, q: ListQuery)
+    -> AppResult<(HeaderMap, Json<Vec<Value>>)> {
+    let (headers, Json(rows)) = matches_core(state, client, provider, q).await?;
+    let ids: Vec<i64> = rows.iter().map(|m| m.id).collect();
+    let odds: Vec<Odd> = if ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            "SELECT * FROM odds WHERE match_id = ANY($1) ORDER BY match_id, market, outcome",
+        )
+        .bind(&ids)
+        .fetch_all(&state.pool)
+        .await?
+    };
+    let mut by_match: std::collections::HashMap<i64, Vec<Odd>> = std::collections::HashMap::new();
+    for o in odds {
+        by_match.entry(o.match_id).or_default().push(o);
+    }
+    let out: Vec<Value> = rows
+        .into_iter()
+        .map(|m| {
+            let match_odds = by_match.remove(&m.id).unwrap_or_default();
+            let mut v = serde_json::to_value(&m).unwrap_or_else(|_| json!({}));
+            v["odds"] = serde_json::to_value(match_odds).unwrap_or_else(|_| json!([]));
+            v
+        })
+        .collect();
+    Ok((headers, Json(out)))
+}
 // ---- match detail ----
 pub(crate) async fn match_detail_core(state: &AppState, client: &ApiClient, provider: &str, id: i64)
     -> AppResult<(HeaderMap, Json<Value>)> {
@@ -443,20 +476,31 @@ async fn openapi(State(state): State<AppState>) -> Json<Value> {
         let o_ex = if is_exchange { &exch_odds_ex } else { &odds_ex };
         let odds_note = if is_exchange { "odds (back, lay, volume, suspended)" } else { "odds" };
 
-        // Exchange (d247): EXACTLY 6 endpoints — odds are returned inside
-        // /matchdetails/:id, so there is no separate odds/markets/live endpoint.
+        // Exchange (d247): EXACTLY 6 endpoints — no separate odds/markets/live
+        // endpoint. /matches embeds each row's full odds + lock status, and
+        // /matchdetails/:id returns the same for one match.
         if is_exchange {
+            // /matches rows carry everything the scraper captured: odds with
+            // back/lay/volume, per-runner suspended, and the match-level lock.
+            let exch_matches_with_odds_ex = json!([{
+                "id": exch_match_ex[0]["id"], "provider": exch_match_ex[0]["provider"],
+                "sport_name": exch_match_ex[0]["sport_name"], "league_name": exch_match_ex[0]["league_name"],
+                "home_team": exch_match_ex[0]["home_team"], "away_team": exch_match_ex[0]["away_team"],
+                "status": "live", "match_time": exch_match_ex[0]["match_time"],
+                "suspended": false, "updated_at": exch_match_ex[0]["updated_at"],
+                "odds": exch_odds_ex
+            }]);
             paths.insert(format!("/{pv}/sports"), json!({"get": {"tags":[tag.clone()],
                 "summary": format!("{} — sports + ids", p.name),
                 "responses": {"200": resp("Sports list", &sport_ex)}}}));
             paths.insert(format!("/{pv}/matches"), json!({"get": {"tags":[tag.clone()],
-                "summary": format!("{} — matches for a sport", p.name),
+                "summary": format!("{} — matches with embedded odds (back/lay/volume) + lock status", p.name),
                 "parameters":[
                     {"name":"sport_id","in":"query","schema":{"type":"integer"}},
                     {"name":"status","in":"query","schema":{"type":"string","enum":["live","prematch","finished"]}},
                     {"name":"limit","in":"query","schema":{"type":"integer","default":50}},
                     {"name":"offset","in":"query","schema":{"type":"integer","default":0}}],
-                "responses": {"200": resp("Matches", m_ex)}}}));
+                "responses": {"200": resp("Matches, each with its full odds set and suspended flags", &exch_matches_with_odds_ex)}}}));
             paths.insert(format!("/{pv}/matchdetails/{{id}}"), json!({"get": {"tags":[tag.clone()],
                 "summary": format!("{} — match detail + all odds (back/lay/volume/suspended)", p.name),
                 "parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer"}}],

@@ -81,21 +81,60 @@ EXTRACT_JS = r"""
         // Column labels (1 / X / 2) from the mobile label divs.
         const labels = [...row.querySelectorAll('.bet-nation-odd.d-xl-none b')]
             .map(b => clean(b.innerText));
-        // Odds columns = those carrying a back price OR currently locked (so a
-        // suspended row still yields its column shape instead of vanishing).
-        const lockSel = '.fa-lock, i.icon-lock, [class*="lock" i], [class*="suspend" i]';
-        const cols = [...row.querySelectorAll('.bet-nation-odd')]
-            .filter(c => c.querySelector('.back .bet-odd') || c.querySelector('.lay .bet-odd') || c.querySelector(lockSel));
+        // Take the DESKTOP odd columns BY POSITION so a row keeps its full column
+        // shape whether priced, dashed or padlocked (a suspended row must not
+        // vanish). Fall back to all odd cells if the desktop variant isn't there.
+        const lockSel = '.fa-lock, i.icon-lock, [class*="lock" i], [class*="suspend" i], .suspended-box';
+        const isDash = t => { const c = (t || '').replace(/\s+/g, ' ').trim(); return c === '' || c === '-' || c === '--'; };
+        let cols = [...row.querySelectorAll('.bet-nation-odd:not(.d-xl-none)')];
+        if (!cols.length) cols = [...row.querySelectorAll('.bet-nation-odd')];
         const backs = cols.map(c => { const b = c.querySelector('.back .bet-odd b'); return b ? num(b.innerText) : null; });
         const lays  = cols.map(c => { const b = c.querySelector('.lay .bet-odd b');  return b ? num(b.innerText) : null; });
-        // A row is suspended when it shows a padlock, or every price cell is locked/empty.
+        // Per-cell lock: padlock/suspended-box element, or a dash where a price
+        // should be. Lets individual outcomes be flagged suspended.
+        const colSusp = cols.map(c => {
+            if (c.querySelector(lockSel)) return true;
+            if (c.querySelector('.back .bet-odd b') || c.querySelector('.lay .bet-odd b')) return false;
+            return isDash(c.innerText);
+        });
+        // Row is suspended when it shows a padlock, or every odd cell is locked.
         const rowLock = !!row.querySelector(lockSel);
-        const allDead = cols.length > 0 && cols.every(c => !c.querySelector('.back .bet-odd b') && !c.querySelector('.lay .bet-odd b'));
+        const allDead = cols.length > 0 && colSusp.every(Boolean);
         const susp = rowLock || allDead;
         const live = !!row.querySelector('.icon-tv');
-        out.push({ href, name, date, labels, backs, lays, susp, live });
+        out.push({ href, name, date, labels, backs, lays, colSusp, susp, live });
     });
     return out;
+}
+"""
+
+# Scroll the VIRTUALIZED event list. d247 renders rows only while in (or near)
+# the viewport, so we must scroll the actual scroll CONTAINER (an inner div, not
+# the window) to force every row to render at least once. Returns scroll metrics
+# so the Python loop knows when the bottom has been reached.
+SCROLL_JS = r"""
+(dy) => {
+    const rows = document.querySelectorAll('.bet-table-row');
+    let cont = null;
+    if (rows.length) {
+        let el = rows[rows.length - 1].parentElement;
+        while (el && el !== document.body) {
+            const s = getComputedStyle(el);
+            if ((s.overflowY === 'auto' || s.overflowY === 'scroll') &&
+                el.scrollHeight > el.clientHeight + 20) { cont = el; break; }
+            el = el.parentElement;
+        }
+    }
+    const t = cont || document.scrollingElement || document.documentElement;
+    t.scrollTop += dy;
+    window.scrollBy(0, dy);   // also nudge the window in case the page itself grows
+    // Fallback that advances virtualization even when no scroll container was
+    // found: pull the last rendered row to the edge so the next batch mounts.
+    if (!cont && rows.length) {
+        try { rows[dy >= 0 ? rows.length - 1 : 0].scrollIntoView({ block: dy >= 0 ? 'end' : 'start' }); } catch (e) {}
+    }
+    return { top: Math.round(t.scrollTop), height: Math.round(t.scrollHeight),
+             client: Math.round(t.clientHeight), rows: rows.length, container: !!cont };
 }
 """
 
@@ -214,6 +253,12 @@ SEPARATORS = [" v ", " vs ", " @ ", " - "]
 # How many live matches to enrich with full detail-page markets per pass.
 DETAIL_CAP = int(os.environ.get("D247_DETAIL_CAP", "25"))
 
+# Grace window (seconds) before a match missing from a sweep is retired. Set
+# generously so a pass that only captured part of d247's scroll-virtualized list
+# never drops matches that are still on the site; only matches genuinely gone for
+# this long age out. ~0 disables (immediate retire). Default 360s (6 min).
+SWEEP_GRACE_SECONDS = int(os.environ.get("D247_SWEEP_GRACE", "360"))
+
 # Read a match DETAIL page: live scorecard + every market (Match Odds back/lay,
 # Bookmaker, Fancy/session/odd-even) with best back & lay prices.
 EXTRACT_DETAIL_JS = r"""
@@ -326,6 +371,7 @@ def build_match(card, sport):
     labels = card.get("labels") or []
     backs = card.get("backs") or []
     lays = card.get("lays") or []
+    col_susp = card.get("colSusp") or []
     markets = []
     for i, b in enumerate(backs):
         label = labels[i] if i < len(labels) else None
@@ -333,13 +379,16 @@ def build_match(card, sport):
         if not outcome:
             continue
         lay = lays[i] if i < len(lays) else None
-        if (b is None or b < 1.0) and (lay is None or lay < 1.0) and not susp:
+        cell_susp = susp or (bool(col_susp[i]) if i < len(col_susp) else False)
+        # Emit the outcome whenever it has a price OR is locked — a suspended
+        # line is real data the user wants (so they see "locked", not a gap).
+        if (b is None or b < 1.0) and (lay is None or lay < 1.0) and not cell_susp:
             continue
         markets.append({
             "market": "Match Result", "outcome": outcome,
             "value": round(float(b), 3) if (b is not None and b >= 1.0) else 0,
             "lay": round(float(lay), 3) if (lay is not None and lay >= 1.0) else None,
-            "volume": None, "param": None, "suspended": susp,
+            "volume": None, "param": None, "suspended": cell_susp,
         })
 
     has_odds = any(o["value"] >= 1.0 for o in markets)
@@ -572,11 +621,19 @@ async def post_snapshot(client, source, matches, sweep=False):
     # `sweep=True` tells the backend this is the COMPLETE set for these sports,
     # so any earlier match in them that is not here is retired (marked dead).
     # Only the full per-sport list sets it — never a partial/detail snapshot.
+    #
+    # `sweep_grace_seconds` softens that retirement: a match missing from THIS
+    # pass is only dropped once it has gone un-scraped for the grace window. So a
+    # pass that captured only part of the (scroll-virtualized) list does NOT kill
+    # matches that are still on d247 — they keep being re-upserted next pass and
+    # only genuinely-gone matches age out. This is what keeps a match visible to
+    # the user "until it actually disappears from the d247 website".
     try:
         r = await client.post(
             f"{BACKEND_URL}/api/ingest/snapshot",
             headers={"X-Ingest-Key": INGEST_KEY},
-            json={"source": source, "provider": PROVIDER, "matches": matches, "sweep": sweep},
+            json={"source": source, "provider": PROVIDER, "matches": matches,
+                  "sweep": sweep, "sweep_grace_seconds": SWEEP_GRACE_SECONDS if sweep else 0},
             timeout=30,
         )
         r.raise_for_status()
@@ -716,34 +773,58 @@ async def scrape_sport(client, page, idx, sport):
     """
     if not await open_tab(page, idx, light=True):  # we drive our own scroll below
         return 0, 0, []
-    # Start at the top of the list.
+    # Start at the very top of the list (scroll the container up hard).
     try:
-        await page.mouse.wheel(0, -40000)
-        await page.wait_for_timeout(250)
+        await page.evaluate(SCROLL_JS, -200000)
+        await page.wait_for_timeout(300)
     except Exception:
         pass
 
-    seen = {}
-    stale = 0
-    for _ in range(60):  # hard cap on scroll steps
-        try:
-            cards = await page.evaluate(EXTRACT_JS)
-        except Exception as e:
-            print(f"  [{sport}] eval error: {e}", file=sys.stderr)
-            cards = []
-        before = len(seen)
-        for c in cards:
+    def absorb(cards):
+        for c in cards or []:
             m = build_match(c, sport)
             if m:
                 # Key by href when present (events share an empty away team).
                 key = m.get("_href") or (m["home"], m["away"])
                 seen[key] = m
-        # Stop once several consecutive steps add nothing new (reached the end).
-        stale = stale + 1 if len(seen) == before else 0
-        if stale >= 4:
+
+    seen = {}
+    stale = 0          # consecutive scroll steps that added no new match
+    bottom_hits = 0    # consecutive steps already at the container bottom
+    last_top = -1
+    # Scroll the virtualized container all the way down, extracting at each step.
+    # We only stop once we've reached the bottom AND stopped finding new rows —
+    # so the WHOLE list is captured, not just the first screenful. Hard cap is
+    # generous (long cricket/soccer lists can be 200+ rows).
+    for _ in range(400):
+        try:
+            absorb(await page.evaluate(EXTRACT_JS))
+        except Exception as e:
+            print(f"  [{sport}] eval error: {e}", file=sys.stderr)
+        before = len(seen)
+        try:
+            info = await page.evaluate(SCROLL_JS, 900)
+        except Exception:
+            info = None
+        await page.wait_for_timeout(200)
+
+        stale = 0 if len(seen) > before else stale + 1
+        if info:
+            at_bottom = info["top"] + info["client"] >= info["height"] - 60
+            moved = info["top"] != last_top
+            last_top = info["top"]
+            bottom_hits = bottom_hits + 1 if at_bottom else 0
+            # Done when we've sat at the bottom a couple steps with nothing new,
+            # or the list won't scroll any further and has gone stale.
+            if (bottom_hits >= 2 and stale >= 2) or (not moved and stale >= 4):
+                break
+        elif stale >= 6:
             break
-        await page.mouse.wheel(0, 1100)
-        await page.wait_for_timeout(220)
+    # One final extract at the resting position to catch the last rows.
+    try:
+        absorb(await page.evaluate(EXTRACT_JS))
+    except Exception:
+        pass
 
     matches = list(seen.values())
     if not matches:

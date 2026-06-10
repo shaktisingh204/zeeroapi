@@ -170,7 +170,7 @@ export function endpointsFor(p: ProviderProfile): ApiEndpoint[] {
   // so there is no separate odds/markets/live endpoint.
   if (isExchange(p)) {
     push("sports", "/sports", "Sports with ids and match counts.");
-    push("matches", "/matches", "Matches for a sport (filter by sport_id, status, search).");
+    push("matches", "/matches", "Matches with embedded odds (back/lay/volume) and lock status per row.");
     push("matchdetails", "/matchdetails/{id}", "Match detail + all odds (back, lay, volume, suspended).");
     push("leagues", "/leagues", "Leagues, filterable by sport_id.");
     push("sidebar", "/sidebar", "Full sports tree with nested leagues.");

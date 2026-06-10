@@ -42,11 +42,12 @@ pub(crate) fn build_sportsbook(slug: &'static str) -> Router<AppState> {
 }
 
 /// Exchange providers (d247): EXACTLY 6 endpoints — the canonical flow plus the
-/// header strip. Odds are delivered inside `/matchdetails/:id`, so there is no
-/// separate odds / markets / live / featured / results endpoint here.
+/// header strip. There is no separate odds / markets / live / featured / results
+/// endpoint: `/matches` embeds every row's full odds (back/lay/volume/suspended)
+/// and `/matchdetails/:id` returns the same for a single match.
 ///   1. GET /sports
-///   2. GET /matches?sport_id=ID
-///   3. GET /matchdetails/:id   (match detail + all odds, back/lay/volume/suspended)
+///   2. GET /matches?sport_id=ID  (each match includes its odds + lock status)
+///   3. GET /matchdetails/:id     (match detail + all odds, back/lay/volume/suspended)
 ///   4. GET /leagues?sport_id=ID
 ///   5. GET /sidebar
 ///   6. GET /headermatches
@@ -56,10 +57,13 @@ pub(crate) fn build_exchange(slug: &'static str) -> Router<AppState> {
             "/sports",
             get(move |State(s): State<AppState>, c: ApiClient| async move { v1::sports_core(&s, &c, slug).await }),
         )
+        // Exchange /matches embeds EVERYTHING the scraper captured per match:
+        // full odds (back/lay/volume), per-runner suspended and the match-level
+        // lock status — no second call to /matchdetails needed for a list view.
         .route(
             "/matches",
             get(move |State(s): State<AppState>, c: ApiClient, Query(q): Query<v1::ListQuery>| async move {
-                v1::matches_core(&s, &c, slug, q).await
+                v1::matches_with_odds_core(&s, &c, slug, q).await
             }),
         )
         .route(
