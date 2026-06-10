@@ -9,11 +9,25 @@ the public **demo ID**, and read the rendered `.bet-table-row` event rows.
 Per sport (`/all-sports/{etid}`) we read each row's match name, start time and the
 Match-Odds back prices (1 / X / 2 columns) and POST them to the backend ingest API.
 
-    python scrape_d247.py                 # one pass
-    python scrape_d247.py --loop 30       # every 30s
+    python scrape_d247.py                 # one (full) pass
+    python scrape_d247.py --loop 5        # fast native odds harvest every ~5s
     python scrape_d247.py --headed        # watch it
 
-Env: BACKEND_URL (default http://localhost:8081), INGEST_KEY (default dev-ingest-key)
+Architecture keeps odds in ~real time without re-doing slow work each loop:
+  • STREAMING (default): PARK each of D247_WORKERS tabs on a sport and continuously
+    DRAIN the decrypted native buffer the SPA keeps refilling on its own poll —
+    no DOM scroll, no re-clicking, no detail nav. With tabs >= sports every sport
+    streams in parallel, so odds reach the API gated only by d247's poll rate
+    (~1-2s). The native list payload is the COMPLETE match set + Match-Odds ladders
+    regardless of DOM virtualization, so streaming needs no scrolling at all.
+  • FULL pass (every D247_FULL_EVERY seconds, default 120): sidebar/featured/
+    header catalog + DOM admin snapshot + detail-page Fancy/Bookmaker enrichment.
+Set D247_STREAM=0 to fall back to the older fast/full tab-cycling cadence.
+
+Env: BACKEND_URL (default http://localhost:8081), INGEST_KEY (default dev-ingest-key),
+     D247_WORKERS (default 4; raise it to stream more sports 1:1),
+     D247_STREAM (default 1), D247_STREAM_INTERVAL (default 0.4s),
+     D247_FULL_EVERY (default 120), D247_ADMIN_SNAPSHOT (default 1)
 """
 import argparse
 import asyncio
@@ -270,6 +284,33 @@ DETAIL_CAP = int(os.environ.get("D247_DETAIL_CAP", "25"))
 # sequential single-page behavior. Tunable via D247_WORKERS (default 4); the pool
 # shares one Cloudflare session, so keep it modest.
 D247_WORKERS = max(1, int(os.environ.get("D247_WORKERS", "4")))
+
+# How often (seconds) to run the EXPENSIVE "full" pass: the sidebar/featured/
+# header catalog, the DOM admin snapshot, and detail-page enrichment for Fancy/
+# Bookmaker markets. Between full passes EVERY loop runs only the cheap native
+# list harvest (no DOM scroll), so Match-Odds reach the API near-real-time. The
+# full pass refreshes the slow-changing structure + extra markets. Default 120s;
+# set 0 to make every pass a full pass (legacy behavior).
+D247_FULL_EVERY = float(os.environ.get("D247_FULL_EVERY", "120"))
+
+# Streaming mode (default ON): instead of re-clicking every sport tab each pass,
+# PARK each worker tab on a sport and continuously DRAIN the decrypted native
+# buffer the SPA keeps refilling on its own poll. With enough tabs every live
+# sport streams in parallel in real time (gated only by d247's own poll rate),
+# collapsing odds latency from minutes to ~1-2s. Set 0 for the older fast/full
+# tab-cycling cadence.
+D247_STREAM = os.environ.get("D247_STREAM", "1") != "0"
+
+# Drain tick (seconds) for a parked single-sport tab — how often we read the
+# buffer between the SPA's polls. Kept small; the real floor is d247's poll rate.
+D247_STREAM_INTERVAL = float(os.environ.get("D247_STREAM_INTERVAL", "0.4"))
+
+# Push the DOM-derived admin snapshot (post_snapshot) during full passes. The
+# PUBLIC diamondexch API reads ONLY the native table (fed every fast pass), so
+# this snapshot exists purely for the admin dashboard and is the one thing that
+# still needs the slow full-list scroll. On by default (keeps the dashboard
+# working); set 0 to skip it and make even full passes much faster.
+D247_ADMIN_SNAPSHOT = os.environ.get("D247_ADMIN_SNAPSHOT", "1") != "0"
 
 # Grace window (seconds) before a match missing from a sweep is retired. Set
 # generously so a pass that only captured part of d247's scroll-virtualized list
@@ -1234,7 +1275,10 @@ async def scrape_sport(client, page, idx, sport):
     # Full list for this sport → sweep: retire matches in this sport that are
     # no longer listed (so the next API response shows only the current set).
     src = f"d247-{sport.lower().replace(' ', '-')}"
-    mm, oo = await post_snapshot(client, src, matches, sweep=True)   # shared (admin)
+    # Admin/shared snapshot is the only consumer of the scrolled DOM; the PUBLIC
+    # API reads the native table. Skip it when D247_ADMIN_SNAPSHOT=0 to save a POST.
+    mm, oo = (await post_snapshot(client, src, matches, sweep=True)
+              if D247_ADMIN_SNAPSHOT else (0, 0))
     # The d247 NATIVE table is fed from the JSON.parse capture (full fidelity:
     # cname/cid/mid/sid/size/ladders) collected NOW for THIS sport.
     nat = await collect_and_post_native_sport(client, page, sport)
@@ -1346,14 +1390,15 @@ async def one_pass(client, page):
     return total_m, total_o, len(labels)
 
 
-async def collect_and_post_native_sport(client, page, sport):
-    """Read the native-capture buffer (just THIS sport's list payload, since
-    scrape_sport cleared it before navigating), convert to events using the known
-    sport name, and POST to the d247 table per etid with sweep."""
+async def collect_native_sport_events(page, sport):
+    """Drain the native-capture buffer (just THIS sport's list payload, since the
+    caller cleared it before navigating) and return de-duped native events. The
+    decrypted t1/t2 arrays are the COMPLETE match list for the sport regardless of
+    DOM virtualization — so this needs no scroll."""
     try:
         payloads = await page.evaluate("() => { const x = window.__dxlist || []; window.__dxlist = []; return x; }")
     except Exception:
-        return 0
+        return []
     by_gmid = {}
     for pl in payloads or []:
         for arr in (pl.get("t1") or [], pl.get("t2") or []):
@@ -1361,16 +1406,28 @@ async def collect_and_post_native_sport(client, page, sport):
                 ev = native_match_to_event(mm, sport)
                 if ev:
                     by_gmid[ev["gmid"]] = ev
-    if not by_gmid:
+    return list(by_gmid.values())
+
+
+async def post_native_sport_events(client, sport, events, sweep=True):
+    """POST native events for one sport to the d247 table, grouped per etid (so
+    each etid's set is swept/replaced wholesale)."""
+    if not events:
         return 0
     groups = {}
-    for ev in by_gmid.values():
+    for ev in events:
         groups.setdefault(ev["etid"], []).append(ev)
     src = f"d247-native-{sport.lower().replace(' ', '-')}"
     total = 0
-    for etid, events in groups.items():
-        total += await post_d247_native(client, src, events, sweep=True)
+    for etid, evs in groups.items():
+        total += await post_d247_native(client, src, evs, sweep=sweep)
     return total
+
+
+async def collect_and_post_native_sport(client, page, sport):
+    """Drain the native buffer for THIS sport and POST it (sweep)."""
+    events = await collect_native_sport_events(page, sport)
+    return await post_native_sport_events(client, sport, events)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1453,6 +1510,175 @@ async def enrich_parallel(client, pages, live_targets):
         for wid, page in enumerate(pages)
     ))
     return done["n"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Fast pass — drain the native odds buffer with NO DOM scroll, every loop.
+# ═══════════════════════════════════════════════════════════════════════════
+# d247's SPA polls its (encrypted) list endpoint and our JSON.parse hook stashes
+# the DECRYPTED payload into window.__dxlist continuously. The payload's t1/t2
+# arrays carry the COMPLETE match set + Match-Odds ladders for the selected tab,
+# independent of which rows the virtualized DOM has rendered. So to get fresh
+# odds we only need to: switch to the sport tab, wait for the poll to land, and
+# read the buffer — no 400-step scroll, no detail navigation. This collapses a
+# per-sport sweep from seconds to ~1-2s, so Match-Odds reach the API near-real-
+# time. Structure + Fancy/Bookmaker are refreshed by the throttled full pass.
+
+async def await_native(page, deadline_s=4.0):
+    """Wait (adaptively) until the SPA has polled the current tab's list endpoint
+    and the decrypted payload has landed in __dxlist. Returns True if data
+    arrived before the deadline."""
+    end = time.monotonic() + deadline_s
+    while time.monotonic() < end:
+        try:
+            n = await page.evaluate(
+                "() => (window.__dxlist||[]).reduce("
+                "(a,p)=>a+((p.t1||[]).length+(p.t2||[]).length),0)")
+        except Exception:
+            n = 0
+        if n:
+            # Brief settle so a split t1/t2 poll is fully captured before we read.
+            await page.wait_for_timeout(150)
+            return True
+        await page.wait_for_timeout(200)
+    return False
+
+
+async def park_tab(page, idx):
+    """Click the idx-th sport tab once so the SPA starts polling that sport's
+    (encrypted) list endpoint. Resilient to a re-appearing banner and to the page
+    having been left on a detail route (then we navigate home first). Returns
+    True once the tab is selected."""
+    link = page.locator(TAB_STRIP).nth(idx).locator("a.nav-link")
+    try:
+        await link.click(timeout=6000)
+        return True
+    except Exception:
+        pass
+    await dismiss_modal(page)
+    try:
+        await link.click(timeout=4000)
+        return True
+    except Exception:
+        pass
+    try:  # last resort: the page wandered off the home list — go back and retry.
+        await page.goto(f"{SITE}/", wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(1200)
+        await dismiss_modal(page)
+        await page.locator(TAB_STRIP).nth(idx).locator("a.nav-link").click(timeout=6000)
+        return True
+    except Exception:
+        return False
+
+
+async def scrape_sport_native(client, page, idx, sport):
+    """Fast-pass sweep of one sport: switch to its tab, wait for the decrypted
+    list poll, harvest the native buffer (NO scroll), and POST it (sweep).
+    Returns the number of native events posted."""
+    try:
+        await page.evaluate("() => { window.__dxlist = []; }")
+    except Exception:
+        pass
+    if not await park_tab(page, idx):
+        return 0
+    await await_native(page)
+    return await collect_and_post_native_sport(client, page, sport)
+
+
+# ── Streaming workers: parked tabs + continuous drain ───────────────────────────
+async def _stream_worker(client, page, assigned, stop, deadline):
+    """One worker page's stream loop. `assigned` is the list of (idx, sport) this
+    page owns. If it owns ONE sport it parks there and drains every SPA poll —
+    pure real-time streaming, no re-clicking. If it owns several (fewer pages than
+    sports), it round-robins them, parking each just long enough for one poll."""
+    if not assigned:
+        return
+    single = len(assigned) == 1
+    pos = 0
+    parked_idx = None
+    while not stop.is_set() and time.monotonic() < deadline:
+        idx, sport = assigned[pos]
+        if parked_idx != idx:
+            try:
+                await page.evaluate("() => { window.__dxlist = []; }")
+            except Exception:
+                pass
+            if not await park_tab(page, idx):
+                pos = (pos + 1) % len(assigned)
+                await page.wait_for_timeout(300)
+                continue
+            parked_idx = idx
+        # Wait for the next decrypted poll to land (buffer was cleared on park /
+        # after the previous drain), then harvest + POST.
+        got = await await_native(page, deadline_s=4.0)
+        if got:
+            await collect_and_post_native_sport(client, page, sport)
+        if single:
+            # Parked: stay put, just pace the next read against d247's poll rate.
+            await page.wait_for_timeout(int(D247_STREAM_INTERVAL * 1000))
+        else:
+            # Rotate to the next owned sport (re-click it next iteration).
+            pos = (pos + 1) % len(assigned)
+            parked_idx = None
+
+
+async def stream_until(client, pages, labels, stop, deadline):
+    """Distribute sports across the worker pages (round-robin) and run every
+    page's stream loop concurrently until `deadline`. With pages >= sports each
+    page owns exactly one sport → every sport streams in parallel in real time."""
+    if not labels:
+        return
+    buckets = [[] for _ in pages]
+    for i, sport in enumerate(labels):
+        buckets[i % len(pages)].append((i, sport))
+    npark = sum(1 for b in buckets if len(b) == 1)
+    print(f"  streaming {len(labels)} sports across {len(pages)} tabs "
+          f"({npark} parked 1:1) until next full pass", flush=True)
+    await asyncio.gather(*(
+        _stream_worker(client, pages[w], buckets[w], stop, deadline)
+        for w in range(len(pages))
+    ))
+
+
+async def fast_pass_parallel(client, pages):
+    """Fast pass across the worker-page pool: each page pulls sports off a shared
+    queue and harvests the native odds buffer for each (no scroll, no detail)."""
+    primary = pages[0]
+    labels = await tab_labels(primary)
+    if not labels:
+        print("  no sport tabs found", file=sys.stderr)
+        return 0, 0
+    queue = asyncio.Queue()
+    for idx, sport in enumerate(labels):
+        queue.put_nowait((idx, sport))
+    totals = {"n": 0}
+    agg = asyncio.Lock()
+
+    def make_handler(page, wid):
+        async def handle(item):
+            idx, sport = item
+            nat = await scrape_sport_native(client, page, idx, sport)
+            async with agg:
+                totals["n"] += nat
+        return handle
+
+    await asyncio.gather(*(
+        _drain_queue(queue, f"w{wid}", make_handler(page, wid))
+        for wid, page in enumerate(pages)
+    ))
+    return totals["n"], len(labels)
+
+
+async def fast_pass(client, page):
+    """Single-page fast pass: harvest the native odds buffer for every sport."""
+    labels = await tab_labels(page)
+    if not labels:
+        print("  no sport tabs found", file=sys.stderr)
+        return 0, 0
+    total = 0
+    for idx, sport in enumerate(labels):
+        total += await scrape_sport_native(client, page, idx, sport)
+    return total, len(labels)
 
 
 async def one_pass_parallel(client, pages):
@@ -1958,19 +2184,42 @@ async def run_engine(name, args, stop):
             while not stop.is_set():
                 t0 = time.monotonic()
                 n += 1
+                # FULL pass: structure (sidebar/featured/header) + detail-page
+                # Fancy/Bookmaker markets + native odds for every sport. Always run
+                # first so the catalog exists, then refreshed each cycle.
                 if len(pages) > 1:
                     tm, to, nsports = await one_pass_parallel(client, pages)
                 else:
                     tm, to, nsports = await one_pass(client, page)
                 dt = (time.monotonic() - t0) * 1000
-                print(f"[{name}] pass {n}: {tm} matches, {to} odds across {nsports} sports in {dt:.0f}ms\n")
+                print(f"[{name}] FULL pass {n}: {tm} matches, {to} odds "
+                      f"across {nsports} sports in {dt:.0f}ms\n")
                 if args.loop <= 0:
                     break
-                sleep = max(0, args.loop - (time.monotonic() - t0))
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=sleep)
-                except asyncio.TimeoutError:
-                    pass
+
+                # Steady state until the next full pass is due. Odds stream here.
+                deadline = time.monotonic() + max(0.0, D247_FULL_EVERY)
+                if D247_STREAM:
+                    # Park each tab on a sport and continuously drain the decrypted
+                    # native buffer → odds reach the API in ~real time (no scroll,
+                    # no re-clicking, no detail nav).
+                    labels = await tab_labels(page)
+                    await stream_until(client, pages, labels, stop, deadline)
+                else:
+                    # Older cadence: repeat cheap tab-cycling fast passes.
+                    while not stop.is_set() and time.monotonic() < deadline:
+                        ts = time.monotonic()
+                        if len(pages) > 1:
+                            nat, nsp = await fast_pass_parallel(client, pages)
+                        else:
+                            nat, nsp = await fast_pass(client, page)
+                        print(f"[{name}] fast pass: {nat} native events across "
+                              f"{nsp} sports in {(time.monotonic()-ts)*1000:.0f}ms")
+                        slp = max(0, args.loop - (time.monotonic() - ts))
+                        try:
+                            await asyncio.wait_for(stop.wait(), timeout=slp)
+                        except asyncio.TimeoutError:
+                            pass
         return True
     finally:
         print(f"[{name}] shutting down (browser closing)...")
