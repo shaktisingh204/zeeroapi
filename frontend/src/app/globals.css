@@ -5,6 +5,69 @@
 :root {
   color-scheme: dark;
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+
+  /* ---- Dark theme tokens (default, rgb triplets) ---- */
+  --bg: 10 12 18;
+  --surface: 17 21 31;
+  --surface-2: 24 29 41;
+  --surface-3: 33 40 56;
+  --border: 37 44 59;
+  --border-soft: 29 35 48;
+  --muted: 138 147 166;
+  --muted-2: 93 102 119;
+  --ink: 255 255 255;
+  --body-ink: 231 234 241;
+  --brand: 52 210 123;
+  --brand-dark: 35 183 104;
+  --brand-soft: rgba(52, 210, 123, 0.12);
+  --brand-contrast: 0 0 0;
+  --live: 239 68 68;
+  --back: 90 169 239;
+  --lay: 240 138 160;
+  --info: 96 165 250;
+  --warn: 250 204 21;
+  --violet2: 192 132 252;
+  --ring-offset: #0a0c12;
+  --scrollbar: #252c3b;
+  --scrollbar-hover: #353d4f;
+  --shadow-card: 0 1px 2px rgba(5, 8, 14, 0.5), 0 8px 24px -12px rgba(5, 8, 14, 0.7);
+  --shadow-pop: 0 12px 40px -12px rgba(5, 8, 14, 0.85);
+  --shadow-glow: 0 0 0 1px rgba(52, 210, 123, 0.35), 0 8px 28px -8px rgba(52, 210, 123, 0.35);
+}
+
+/* ---- Light console theme (developer portal) ----
+   Stripe-style: cool gray surfaces, near-navy ink, one emerald accent. */
+.theme-light {
+  color-scheme: light;
+  --bg: 246 248 250;
+  --surface: 255 255 255;
+  --surface-2: 241 244 248;
+  --surface-3: 231 236 242;
+  --border: 227 232 238;
+  --border-soft: 235 239 244;
+  --muted: 91 107 128;
+  --muted-2: 133 147 166;
+  --ink: 26 35 51;
+  --body-ink: 51 61 79;
+  --brand: 5 150 105;
+  --brand-dark: 4 120 87;
+  --brand-soft: rgba(5, 150, 105, 0.1);
+  --brand-contrast: 255 255 255;
+  --live: 220 38 38;
+  --back: 47 127 214;
+  --lay: 212 86 122;
+  --info: 37 99 235;
+  --warn: 180 83 9;
+  --violet2: 124 58 237;
+  --ring-offset: #f6f8fa;
+  --scrollbar: #d3dae3;
+  --scrollbar-hover: #b9c3cf;
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 8px 24px -16px rgba(16, 24, 40, 0.12);
+  --shadow-pop: 0 12px 40px -12px rgba(16, 24, 40, 0.16);
+  --shadow-glow: 0 0 0 1px rgba(5, 150, 105, 0.25), 0 8px 28px -8px rgba(5, 150, 105, 0.25);
+
+  background-color: rgb(var(--bg));
+  color: rgb(var(--body-ink));
 }
 
 @layer base {
@@ -18,7 +81,7 @@
       radial-gradient(900px 500px at 12% -8%, rgba(52, 210, 123, 0.06), transparent 60%),
       radial-gradient(1000px 600px at 110% 0%, rgba(40, 70, 120, 0.10), transparent 55%);
     background-attachment: fixed;
-    color: #e7eaf1;
+    color: rgb(var(--body-ink));
     font-feature-settings: "cv01", "ss01";
     text-rendering: optimizeLegibility;
   }
@@ -38,12 +101,12 @@
   /* Visible keyboard focus everywhere (accessibility). */
   :focus-visible {
     outline: none;
-    box-shadow: 0 0 0 2px #0a0c12, 0 0 0 4px rgba(52, 210, 123, 0.6);
+    box-shadow: 0 0 0 2px var(--ring-offset), 0 0 0 4px rgb(var(--brand) / 0.6);
     border-radius: 6px;
   }
   ::selection {
-    background: rgba(52, 210, 123, 0.28);
-    color: #fff;
+    background: rgb(var(--brand) / 0.25);
+    color: rgb(var(--ink));
   }
 }
 
@@ -56,11 +119,11 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #252c3b;
+  background: var(--scrollbar);
   border-radius: 6px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #353d4f;
+  background: var(--scrollbar-hover);
 }
 
 @layer components {
@@ -76,18 +139,22 @@
            disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100;
   }
   .btn-primary {
-    @apply btn bg-brand text-black hover:bg-brand-dark shadow-[0_4px_16px_-6px_rgba(52,210,123,0.5)];
+    @apply btn bg-brand text-brand-contrast hover:bg-brand-dark shadow-[0_4px_16px_-6px_rgb(var(--brand)/0.5)];
   }
   .btn-ghost {
-    @apply btn bg-surface-2 text-gray-200 border border-border hover:bg-surface-3 hover:border-muted-2;
+    @apply btn bg-surface-2 text-ink border border-border hover:bg-surface-3 hover:border-muted-2;
   }
   .btn-quiet {
-    @apply btn text-muted hover:text-white hover:bg-surface-2;
+    @apply btn text-muted hover:text-ink hover:bg-surface-2;
   }
   .input {
-    @apply w-full rounded-lg bg-surface-2 border border-border px-3 py-2 text-sm text-gray-100
+    @apply w-full rounded-lg bg-surface-2 border border-border px-3 py-2 text-sm text-ink
            outline-none transition-colors placeholder:text-muted-2
            focus:border-brand focus:bg-surface-3;
+  }
+  /* Dark code block — stays dark in both themes (Stripe-console style). */
+  .codeblock {
+    @apply rounded-lg border border-black/40 bg-[#0b0e14] text-gray-300;
   }
   /* Squared (not pill) badges — less generic. */
   .badge {

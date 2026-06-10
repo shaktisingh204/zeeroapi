@@ -46,6 +46,12 @@ pub struct Snapshot {
     /// Same as `featured_ids`, for the header match strip.
     #[serde(default)]
     pub header_ids: Vec<i64>,
+    /// When true, this snapshot is the COMPLETE current set for the sports it
+    /// contains. After upserting, any earlier match in those same sports that is
+    /// NOT in this snapshot is marked `dead` (and dropped from API responses).
+    /// Set this only on a full list sweep, never on a partial/detail snapshot.
+    #[serde(default)]
+    pub sweep: bool,
 }
 
 fn default_provider() -> String {
@@ -205,6 +211,10 @@ async fn snapshot(
             .await?;
     }
 
+    // Track ids + sports in this snapshot, for the optional dead-sweep below.
+    let mut seen_ids: Vec<i64> = Vec::new();
+    let mut seen_sports: std::collections::HashSet<i64> = std::collections::HashSet::new();
+
     for m in &snap.matches {
         let sport_id = stable_id(&[provider, &m.sport]);
         sqlx::query(
@@ -269,6 +279,8 @@ async fn snapshot(
         let match_id = m
             .ext_id
             .unwrap_or_else(|| stable_id(&[provider, &m.sport, &m.home, &m.away]));
+        seen_ids.push(match_id);
+        seen_sports.insert(sport_id);
 
         sqlx::query(
             "INSERT INTO matches
@@ -284,6 +296,7 @@ async fn snapshot(
                 suspended = EXCLUDED.suspended,
                 featured = (matches.featured OR EXCLUDED.featured),
                 header = (matches.header OR EXCLUDED.header),
+                dead = false,
                 source = EXCLUDED.source, updated_at = now()",
         )
         .bind(match_id)
@@ -350,6 +363,25 @@ async fn snapshot(
             .await?;
             total_odds += 1;
         }
+    }
+
+    // Dead-sweep: when the scraper marks this snapshot as the complete set for
+    // its sports, retire (mark dead) every earlier match in those same sports
+    // that is NOT in this snapshot. Re-scraped matches were revived to dead=false
+    // by the upsert above, so only genuinely-gone matches are retired. Finished
+    // matches are never swept (they belong in /results).
+    if snap.sweep && !seen_ids.is_empty() && !seen_sports.is_empty() {
+        let sports: Vec<i64> = seen_sports.iter().copied().collect();
+        sqlx::query(
+            "UPDATE matches SET dead = true
+             WHERE provider = $1 AND sport_id = ANY($2) AND id <> ALL($3)
+               AND dead = false AND status <> 'finished'",
+        )
+        .bind(provider)
+        .bind(&sports)
+        .bind(&seen_ids)
+        .execute(&mut *tx)
+        .await?;
     }
 
     // Catalog the full sports-tree / sidebar (sports + leagues with no current

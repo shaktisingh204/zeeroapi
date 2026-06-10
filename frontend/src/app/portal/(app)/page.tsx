@@ -18,17 +18,17 @@ import type { ApiKey } from "@/lib/types";
 import { PageHeader, StatCard, Spinner, SectionCard, EmptyState } from "@/components/ui";
 
 const QUICK_LINKS = [
-  { href: "/portal/keys", label: "API Keys", desc: "Create and manage keys", icon: KeyRound, c: "#34d27b" },
+  { href: "/portal/keys", label: "API Keys", desc: "Create and manage keys", icon: KeyRound, c: "#059669" },
   { href: "/portal/providers", label: "Providers", desc: "Browse the catalog", icon: Boxes, c: "#3b82f6" },
   { href: "/portal/playground", label: "Playground", desc: "Test calls live", icon: TerminalSquare, c: "#8b5cf6" },
-  { href: "/portal/sdks", label: "SDKs", desc: "Typed clients", icon: Code2, c: "#f59e0b" },
+  { href: "/portal/sdks", label: "SDKs", desc: "Typed clients", icon: Code2, c: "#d97706" },
 ];
 
 function statusColor(s?: number) {
-  if (!s) return "#8a93a6";
-  if (s >= 500) return "#ef4444";
-  if (s >= 400) return "#f59e0b";
-  return "#34d27b";
+  if (!s) return "#5b6b80";
+  if (s >= 500) return "#dc2626";
+  if (s >= 400) return "#d97706";
+  return "#059669";
 }
 
 export default function PortalOverview() {
@@ -58,7 +58,7 @@ export default function PortalOverview() {
   const used = usage?.used_this_month ?? 0;
   const unlimited = quota <= 0;
   const pct = unlimited ? 0 : Math.min(100, Math.round((used / quota) * 100));
-  const meterColor = pct >= 90 ? "#ef4444" : pct >= 70 ? "#f59e0b" : "#34d27b";
+  const meterColor = pct >= 90 ? "#dc2626" : pct >= 70 ? "#d97706" : "#059669";
   const activeKeys = keys.filter((k) => !k.revoked).length;
   const firstRun = activeKeys === 0;
 
@@ -78,9 +78,9 @@ export default function PortalOverview() {
 
       {/* Stats */}
       <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <StatCard label="Current plan" value={plan.name} icon={<Rocket size={18} />} accent="#34d27b" />
+        <StatCard label="Current plan" value={plan.name} icon={<Rocket size={18} />} accent="#059669" />
         <StatCard label="Rate limit" value={`${plan.rate_limit_per_min}/min`} icon={<Clock size={18} />} accent="#3b82f6" />
-        <StatCard label="Active keys" value={activeKeys} icon={<KeyRound size={18} />} accent="#f59e0b" />
+        <StatCard label="Active keys" value={activeKeys} icon={<KeyRound size={18} />} accent="#d97706" />
       </div>
 
       {/* Usage meter */}
@@ -88,7 +88,7 @@ export default function PortalOverview() {
         <div className="mb-3 flex items-end justify-between">
           <div>
             <p className="text-sm text-muted">Requests this month</p>
-            <p className="mt-1 text-2xl font-semibold tabular-nums text-white">
+            <p className="mt-1 text-2xl font-semibold tabular-nums text-ink">
               {used.toLocaleString()}
               <span className="text-base font-normal text-muted">
                 {" "}/ {unlimited ? "unlimited" : quota.toLocaleString()}
@@ -113,7 +113,7 @@ export default function PortalOverview() {
         <div className="card mb-6 border-brand/30 p-5">
           <div className="mb-4 flex items-center gap-2">
             <Rocket size={18} className="text-brand" />
-            <h2 className="text-lg font-semibold text-white">Get started in 3 steps</h2>
+            <h2 className="text-lg font-semibold text-ink">Get started in 3 steps</h2>
           </div>
           <ol className="grid gap-3 sm:grid-cols-3">
             {[
@@ -123,7 +123,7 @@ export default function PortalOverview() {
             ].map((s) => (
               <li key={s.n} className="flex flex-col rounded-lg bg-surface-2/50 p-4">
                 <span className="badge mb-2 w-fit bg-brand/15 text-brand">{s.n}</span>
-                <p className="text-sm font-medium text-white">{s.t}</p>
+                <p className="text-sm font-medium text-ink">{s.t}</p>
                 <p className="mt-1 flex-1 text-xs text-muted">{s.d}</p>
                 <Link href={s.href} className="btn-ghost mt-3 justify-center text-sm">
                   {s.cta}
@@ -154,7 +154,7 @@ export default function PortalOverview() {
                   >
                     {r.status ?? "-"}
                   </span>
-                  <code className="min-w-0 flex-1 truncate text-gray-300">{r.m} {r.p}</code>
+                  <code className="min-w-0 flex-1 truncate text-ink">{r.m} {r.p}</code>
                   {r.latency_ms != null && (
                     <span className="shrink-0 text-xs tabular-nums text-muted">{r.latency_ms}ms</span>
                   )}
@@ -184,7 +184,7 @@ export default function PortalOverview() {
               >
                 <Icon size={18} />
               </div>
-              <p className="mt-3 flex items-center gap-1 font-medium text-white">
+              <p className="mt-3 flex items-center gap-1 font-medium text-ink">
                 {l.label}
                 <ArrowRight size={14} className="text-muted-2 transition-transform duration-150 group-hover:translate-x-0.5" />
               </p>
@@ -197,11 +197,11 @@ export default function PortalOverview() {
       {/* Quick start */}
       <SectionCard title="Quick start">
         <p className="mb-4 text-sm text-muted">
-          Authenticate with the <code className="text-white">X-API-Key</code> header. Endpoints are
-          provider-scoped (<code className="text-white">/{`{provider}`}/...</code>).
+          Authenticate with the <code className="text-ink">X-API-Key</code> header. Endpoints are
+          provider-scoped (<code className="text-ink">/{`{provider}`}/...</code>).
         </p>
         <div className="flex items-center gap-2">
-          <pre className="flex-1 overflow-x-auto rounded-lg border border-border bg-[#0b0e14] p-4 text-sm text-gray-300">
+          <pre className="codeblock flex-1 overflow-x-auto p-4 text-sm">
 {`curl -H "X-API-Key: YOUR_KEY" "${API_BASE}/melbet/live"`}
           </pre>
         </div>

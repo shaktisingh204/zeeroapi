@@ -62,7 +62,7 @@ export default function ProvidersPage() {
             key={f}
             onClick={() => setFilter(f)}
             className={`rounded-md px-3 py-1.5 text-sm font-medium capitalize transition-colors ${
-              filter === f ? "bg-brand text-black" : "text-muted hover:text-white"
+              filter === f ? "bg-brand text-brand-contrast" : "text-muted hover:text-ink"
             }`}
           >
             {f} <span className="tabular-nums opacity-70">{counts[f]}</span>
@@ -96,7 +96,7 @@ export default function ProvidersPage() {
                       {p.name[0]?.toUpperCase()}
                     </span>
                     <div>
-                      <p className="font-semibold text-white">{p.name}</p>
+                      <p className="font-semibold text-ink">{p.name}</p>
                       <code className="text-xs text-muted">/{p.slug}</code>
                     </div>
                   </div>
@@ -124,7 +124,7 @@ export default function ProvidersPage() {
                     </p>
                     <div className="flex flex-wrap gap-1">
                       {p.markets.map((m) => (
-                        <span key={m} className="rounded bg-surface-2 px-1.5 py-0.5 text-[11px] text-gray-300">{m}</span>
+                        <span key={m} className="rounded bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted">{m}</span>
                       ))}
                     </div>
                   </div>
@@ -162,12 +162,12 @@ export default function ProvidersPage() {
                       <span className="rounded bg-brand/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-brand">
                         {r.method}
                       </span>
-                      <code className="min-w-0 flex-1 truncate font-mono text-xs text-gray-300" title={r.desc}>
+                      <code className="min-w-0 flex-1 truncate font-mono text-xs text-muted" title={r.desc}>
                         /v1{r.path}
                       </code>
                       <button
                         onClick={() => copyCurl(r.path)}
-                        className="shrink-0 text-muted-2 transition-colors hover:text-white active:scale-95"
+                        className="shrink-0 text-muted-2 transition-colors hover:text-ink active:scale-95"
                         aria-label="Copy as curl"
                       >
                         {copied === r.path ? <Check size={14} className="text-brand" /> : <Copy size={14} />}

@@ -94,7 +94,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
 
   if (loading || !customer) {
     return (
-      <div className="min-h-[100dvh] flex items-center justify-center">
+      <div className="theme-light min-h-[100dvh] bg-bg flex items-center justify-center">
         <Spinner />
       </div>
     );
@@ -108,10 +108,11 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
   const used = usage?.used_this_month ?? 0;
   const unlimited = quota <= 0;
   const pct = unlimited ? 0 : Math.min(100, Math.round((used / quota) * 100));
-  const meterColor = pct >= 90 ? "#ef4444" : pct >= 70 ? "#f59e0b" : "#34d27b";
+  const meterColor =
+    pct >= 90 ? "rgb(var(--live))" : pct >= 70 ? "#d97706" : "rgb(var(--brand))";
 
   return (
-    <div className="min-h-[100dvh] lg:flex">
+    <div className="theme-light min-h-[100dvh] bg-bg text-ink lg:flex">
       {/* ---------- Sidebar ---------- */}
       <aside
         className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-border bg-surface
@@ -120,14 +121,14 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
       >
         <div className="flex h-16 items-center gap-2 border-b border-border px-5">
           <Link href="/portal" className="flex items-center gap-2">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand shadow-[0_4px_14px_-4px_rgba(52,210,123,0.7)]">
-              <Activity size={18} className="text-black" />
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand shadow-[0_4px_14px_-4px_rgb(var(--brand)/0.7)]">
+              <Activity size={18} className="text-brand-contrast" />
             </span>
-            <span className="font-semibold text-white">ZeroApi</span>
+            <span className="font-semibold text-ink">ZeroApi</span>
           </Link>
           <span className="badge-muted ml-auto">Portal</span>
           <button
-            className="ml-1 text-muted transition-colors hover:text-white lg:hidden"
+            className="ml-1 text-muted transition-colors hover:text-ink lg:hidden"
             onClick={() => setOpen(false)}
             aria-label="Close menu"
           >
@@ -151,8 +152,8 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
                       href={it.href}
                       className={`group relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-all duration-150 active:scale-[0.98] ${
                         active
-                          ? "bg-brand-soft text-white"
-                          : "text-muted hover:bg-surface-2 hover:text-white"
+                          ? "bg-brand-soft text-ink"
+                          : "text-muted hover:bg-surface-2 hover:text-ink"
                       }`}
                     >
                       <span
@@ -177,7 +178,7 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
         <div className="border-t border-border px-4 py-4">
           <div className="mb-1.5 flex items-center justify-between text-xs">
             <span className="text-muted">This month</span>
-            <span className="font-medium tabular-nums text-white">
+            <span className="font-medium tabular-nums text-ink">
               {used.toLocaleString()}
               <span className="text-muted-2"> / {unlimited ? "∞" : quota.toLocaleString()}</span>
             </span>
@@ -192,11 +193,11 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
 
         <div className="border-t border-border p-3">
           <div className="flex items-center gap-2.5 px-2 py-1.5">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-3 text-xs font-semibold text-white">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-3 text-xs font-semibold text-ink">
               {initials}
             </div>
             <div className="min-w-0">
-              <p className="truncate text-sm text-white">{customer.email}</p>
+              <p className="truncate text-sm text-ink">{customer.email}</p>
               <span className="badge-brand mt-0.5">{planName}</span>
             </div>
           </div>
@@ -219,13 +220,13 @@ export default function PortalLayout({ children }: { children: React.ReactNode }
       <div className="min-w-0 flex-1">
         <header className="sticky top-0 z-20 flex h-14 items-center gap-3 border-b border-border bg-bg/80 px-4 backdrop-blur lg:px-8">
           <button
-            className="-ml-1 p-2 text-muted transition-colors hover:text-white lg:hidden"
+            className="-ml-1 p-2 text-muted transition-colors hover:text-ink lg:hidden"
             onClick={() => setOpen(true)}
             aria-label="Open menu"
           >
             <Menu size={18} />
           </button>
-          <span className="text-sm font-medium text-white">{current?.label ?? "Developer Portal"}</span>
+          <span className="text-sm font-medium text-ink">{current?.label ?? "Developer Portal"}</span>
           <div className="ml-auto flex items-center gap-2">
             <Link href="/docs" className="btn-quiet hidden text-sm sm:inline-flex">
               Docs <ExternalLink size={13} />

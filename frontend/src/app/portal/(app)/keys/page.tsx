@@ -135,10 +135,10 @@ export default function ApiKeysPage() {
       {creating && (
         <div className="card mb-6 animate-fade-up border-brand/30 p-5">
           <div className="mb-4 flex items-center justify-between">
-            <h2 className="flex items-center gap-2 font-semibold text-white">
+            <h2 className="flex items-center gap-2 font-semibold text-ink">
               <KeyRound size={17} className="text-brand" /> New API key
             </h2>
-            <button onClick={resetForm} className="text-muted transition-colors hover:text-white" aria-label="Cancel">
+            <button onClick={resetForm} className="text-muted transition-colors hover:text-ink" aria-label="Cancel">
               <X size={18} />
             </button>
           </div>
@@ -167,7 +167,7 @@ export default function ApiKeysPage() {
                       type="button"
                       onClick={() => toggleProvider(p.slug)}
                       className={`badge cursor-pointer transition-colors active:scale-[0.97] ${
-                        on ? "bg-brand/20 text-brand" : "bg-surface-2 text-muted hover:text-white"
+                        on ? "bg-brand/20 text-brand" : "bg-surface-2 text-muted hover:text-ink"
                       }`}
                     >
                       {on && <Check size={12} className="mr-1" />}
@@ -243,7 +243,7 @@ export default function ApiKeysPage() {
                 {keys.map((k) => (
                   <tr key={k.id} className={k.revoked ? "opacity-50" : "transition-colors hover:bg-surface-2/40"}>
                     <td className="td">
-                      <code className={k.revoked ? "text-muted line-through" : "text-white"}>
+                      <code className={k.revoked ? "text-muted line-through" : "text-ink"}>
                         {k.key_prefix}…
                       </code>
                     </td>
@@ -302,14 +302,14 @@ export default function ApiKeysPage() {
           <div className="card w-full max-w-lg animate-fade-up p-6">
             <div className="mb-1 flex items-center gap-2">
               <KeyRound size={18} className="text-brand" />
-              <h2 className="text-lg font-semibold text-white">Your new API key</h2>
+              <h2 className="text-lg font-semibold text-ink">Your new API key</h2>
             </div>
             <p className="mb-4 text-sm text-muted">
               Copy it now. For security it{" "}
-              <strong className="text-white">won&apos;t be shown again</strong>.
+              <strong className="text-ink">won&apos;t be shown again</strong>.
             </p>
             <div className="mb-4 flex items-center gap-2">
-              <code className="flex-1 break-all rounded-lg border border-border bg-[#0b0e14] px-3 py-2 text-sm text-white">
+              <code className="codeblock flex-1 break-all px-3 py-2 text-sm text-gray-100">
                 {issued.key}
               </code>
               <button onClick={copyKey} className="btn-ghost shrink-0">

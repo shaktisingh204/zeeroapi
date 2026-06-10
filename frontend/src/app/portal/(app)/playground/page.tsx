@@ -169,10 +169,10 @@ export default function PlaygroundPage() {
       <PageHeader title="Playground" subtitle="Try the API with your key" />
 
       <div className="grid gap-6 lg:grid-cols-2 lg:items-start">
-      <div className="card p-5">
+      <div className="card min-w-0 p-5">
         <div className="grid gap-4">
           <div>
-            <label className="block text-sm text-white mb-1.5">API key</label>
+            <label className="block text-sm text-ink mb-1.5">API key</label>
             <div className="flex items-center gap-2">
               <input
                 className="input flex-1 font-mono"
@@ -198,7 +198,7 @@ export default function PlaygroundPage() {
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <label className="block text-sm text-white mb-1.5">Provider</label>
+              <label className="block text-sm text-ink mb-1.5">Provider</label>
               <select
                 className="input w-full"
                 value={provider}
@@ -226,7 +226,7 @@ export default function PlaygroundPage() {
               )}
             </div>
             <div>
-              <label className="block text-sm text-white mb-1.5">Endpoint</label>
+              <label className="block text-sm text-ink mb-1.5">Endpoint</label>
               <select
                 className="input w-full"
                 value={endpoint}
@@ -244,7 +244,7 @@ export default function PlaygroundPage() {
 
           {showIdInput && (
             <div>
-              <label className="block text-sm text-white mb-1.5">Match id</label>
+              <label className="block text-sm text-ink mb-1.5">Match id</label>
               <input
                 className="input w-full font-mono"
                 value={matchId}
@@ -271,16 +271,16 @@ export default function PlaygroundPage() {
 
           {selectedEndpoint && (
             <div>
-              <label className="block text-sm text-white mb-1.5">curl</label>
-              <pre className="bg-[#0b0e14] border border-border rounded-lg p-3 text-xs overflow-x-auto">
-                <code className="text-gray-300">{curl}</code>
+              <label className="block text-sm text-ink mb-1.5">curl</label>
+              <pre className="codeblock whitespace-pre-wrap break-all p-3 text-xs">
+                <code>{curl}</code>
               </pre>
             </div>
           )}
         </div>
       </div>
 
-      <div className="card overflow-hidden">
+      <div className="card min-w-0 overflow-hidden">
         {loading ? (
           <Spinner />
         ) : result ? (
@@ -302,8 +302,8 @@ export default function PlaygroundPage() {
                 </span>
               )}
             </div>
-            <pre className="bg-[#0b0e14] border border-border rounded-lg p-4 text-sm overflow-x-auto max-h-[420px] m-4">
-              <code className="text-gray-300">
+            <pre className="codeblock m-4 max-h-[420px] overflow-auto p-4 text-sm">
+              <code>
                 {JSON.stringify(result.body, null, 2)}
               </code>
             </pre>

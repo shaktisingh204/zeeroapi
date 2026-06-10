@@ -566,14 +566,17 @@ def merge_detail(m, detail):
     return added > 0 or bool(detail.get("score")) or bool(detail.get("suspended"))
 
 
-async def post_snapshot(client, source, matches):
+async def post_snapshot(client, source, matches, sweep=False):
     # NB: matches may carry an internal "_href" key — the ingest API ignores
     # unknown fields, and Phase 2 still needs it, so we leave it in place.
+    # `sweep=True` tells the backend this is the COMPLETE set for these sports,
+    # so any earlier match in them that is not here is retired (marked dead).
+    # Only the full per-sport list sets it — never a partial/detail snapshot.
     try:
         r = await client.post(
             f"{BACKEND_URL}/api/ingest/snapshot",
             headers={"X-Ingest-Key": INGEST_KEY},
-            json={"source": source, "provider": PROVIDER, "matches": matches},
+            json={"source": source, "provider": PROVIDER, "matches": matches, "sweep": sweep},
             timeout=30,
         )
         r.raise_for_status()
@@ -751,7 +754,9 @@ async def scrape_sport(client, page, idx, sport):
     # detail page. Both must carry a detail href.
     live = [m for m in matches
             if m.get("_href") and (m["status"] == "live" or m.get("_event"))]
-    mm, oo = await post_snapshot(client, f"d247-{sport.lower().replace(' ', '-')}", matches)
+    # Full list for this sport → sweep: retire matches in this sport that are
+    # no longer listed (so the next API response shows only the current set).
+    mm, oo = await post_snapshot(client, f"d247-{sport.lower().replace(' ', '-')}", matches, sweep=True)
     print(f"  [{sport}] {len(matches)} matches → {mm} upserted, {oo} odds ({len(live)} live)")
     return mm, oo, live
 

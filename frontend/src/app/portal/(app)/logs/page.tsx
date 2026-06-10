@@ -18,7 +18,7 @@ const PAGE = 50;
 function statusColor(code?: number): string {
   if (!code) return "text-muted";
   if (code < 300) return "text-brand";
-  if (code < 500) return "text-yellow-400";
+  if (code < 500) return "text-warn";
   return "text-live";
 }
 
@@ -99,7 +99,7 @@ export default function LogsPage() {
         <select
           value={provider}
           onChange={(e) => setProvider(e.target.value)}
-          className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-white"
+          className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-ink"
         >
           <option value="">All providers</option>
           {providers.map((p) => (
@@ -114,7 +114,7 @@ export default function LogsPage() {
               key={s.label}
               onClick={() => setStatusClass(s.value)}
               className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
-                statusClass === s.value ? "bg-brand text-black font-medium" : "text-muted hover:text-white"
+                statusClass === s.value ? "bg-brand text-brand-contrast font-medium" : "text-muted hover:text-ink"
               }`}
             >
               {s.label}

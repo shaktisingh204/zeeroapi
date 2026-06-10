@@ -1,5 +1,10 @@
 import type { Config } from "tailwindcss";
 
+// All colors are CSS-variable driven (rgb triplets) so themes can be swapped
+// per surface: `:root` is the dark theme, `.theme-light` (developer portal)
+// overrides them with a light console palette. See globals.css.
+const v = (name: string) => `rgb(var(--${name}) / <alpha-value>)`;
+
 const config: Config = {
   content: [
     "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
@@ -8,24 +13,29 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // Tinted-dark navy surface ramp (one consistent cool-gray family).
-        bg: "#0a0c12",
-        surface: "#11151f",
-        "surface-2": "#181d29",
-        "surface-3": "#212838",
-        border: "#252c3b",
-        "border-soft": "#1d2330",
-        muted: "#8a93a6",
-        "muted-2": "#5d6677",
-        // Single, slightly refined emerald accent.
+        bg: v("bg"),
+        surface: v("surface"),
+        "surface-2": v("surface-2"),
+        "surface-3": v("surface-3"),
+        border: v("border"),
+        "border-soft": v("border-soft"),
+        muted: v("muted"),
+        "muted-2": v("muted-2"),
+        // Primary text ("white" in dark theme, near-navy in light theme).
+        ink: v("ink"),
         brand: {
-          DEFAULT: "#34d27b",
-          dark: "#23b768",
-          soft: "rgba(52, 210, 123, 0.12)",
+          DEFAULT: v("brand"),
+          dark: v("brand-dark"),
+          soft: "var(--brand-soft)",
+          // Text/icon color placed on top of solid brand fills.
+          contrast: v("brand-contrast"),
         },
-        live: "#ef4444",
-        back: "#5aa9ef",
-        lay: "#f08aa0",
+        live: v("live"),
+        back: v("back"),
+        lay: v("lay"),
+        info: v("info"),
+        warn: v("warn"),
+        violet2: v("violet2"),
       },
       fontFamily: {
         sans: ["var(--font-sans)", "system-ui", "sans-serif"],
@@ -36,10 +46,10 @@ const config: Config = {
         "2xl": "1.125rem",
       },
       boxShadow: {
-        // Navy-tinted shadows (carry the background hue, not pure black).
-        card: "0 1px 2px rgba(5, 8, 14, 0.5), 0 8px 24px -12px rgba(5, 8, 14, 0.7)",
-        pop: "0 12px 40px -12px rgba(5, 8, 14, 0.85)",
-        glow: "0 0 0 1px rgba(52, 210, 123, 0.35), 0 8px 28px -8px rgba(52, 210, 123, 0.35)",
+        // Theme-tinted shadows (navy in dark, soft gray-blue in light).
+        card: "var(--shadow-card)",
+        pop: "var(--shadow-pop)",
+        glow: "var(--shadow-glow)",
       },
       keyframes: {
         "fade-up": {

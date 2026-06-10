@@ -54,7 +54,7 @@ const STATIC: Record<string, Omit<ProviderProfile, "slug" | "name" | "capabiliti
     markets: ["1x2", "Double Chance", "Total", "Handicap", "Individual Total", "1x2 (incl. OT)"],
     oddFields: ["value", "param", "group_id", "type_code"],
     matchFields: ["live score", "period", "featured", "suspended"],
-    accent: "#34d27b",
+    accent: "#059669",
     blurb: "Sportsbook. Single decimal price per outcome, with the full market-group tree.",
   },
   "1xbet": {
@@ -72,7 +72,7 @@ const STATIC: Record<string, Omit<ProviderProfile, "slug" | "name" | "capabiliti
     markets: ["Match Result", "Double Chance", "Total"],
     oddFields: ["value", "param", "suspended"],
     matchFields: ["live score", "featured", "suspended"],
-    accent: "#f59e0b",
+    accent: "#d97706",
     blurb: "Sportsbook. Single price per outcome; locked outcomes are flagged suspended.",
   },
   megapari: {
@@ -119,7 +119,7 @@ function fromRaw(r: RawProvider): ProviderProfile {
     markets: r.profile?.markets?.length ? r.profile.markets : s?.markets || [],
     oddFields: r.profile?.odd_fields?.length ? r.profile.odd_fields : s?.oddFields || ["value", "param"],
     matchFields: r.profile?.match_fields?.length ? r.profile.match_fields : s?.matchFields || ["live score"],
-    accent: r.profile?.accent || s?.accent || "#34d27b",
+    accent: r.profile?.accent || s?.accent || "#059669",
     blurb: r.profile?.blurb || s?.blurb || "Sports data provider.",
   };
 }

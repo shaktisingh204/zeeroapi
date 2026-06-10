@@ -66,12 +66,12 @@ function CodeBlock({ code }: { code: string }) {
     <div className="relative">
       <button
         onClick={copy}
-        className="absolute top-3 right-3 text-muted hover:text-white transition-colors"
+        className="absolute top-3 right-3 text-gray-400 hover:text-white transition-colors"
         aria-label="Copy"
       >
         {copied ? <Check size={15} className="text-brand" /> : <Copy size={15} />}
       </button>
-      <pre className="bg-[#0d1117] border border-border rounded-lg p-4 overflow-x-auto text-sm">
+      <pre className="bg-[#0d1117] border border-black/40 rounded-lg p-4 overflow-x-auto text-sm">
         <code className="text-gray-200 font-mono whitespace-pre">{code}</code>
       </pre>
     </div>
@@ -99,7 +99,7 @@ export default function SdksPage() {
             key={l.id}
             onClick={() => setLang(l.id)}
             className={`px-4 py-1.5 text-sm rounded-md transition-colors ${
-              lang === l.id ? "bg-brand text-black font-medium" : "text-muted hover:text-white"
+              lang === l.id ? "bg-brand text-brand-contrast font-medium" : "text-muted hover:text-ink"
             }`}
           >
             {l.label}
@@ -121,7 +121,7 @@ export default function SdksPage() {
 
       <div className="grid gap-4 lg:grid-cols-2 mt-6">
         <div className="card p-5">
-          <h2 className="font-semibold text-white mb-2">Authentication</h2>
+          <h2 className="font-semibold text-ink mb-2">Authentication</h2>
           <p className="text-sm text-muted">
             Every request authenticates with your API key via the{" "}
             <code className="text-brand">X-API-Key</code> header (or{" "}
@@ -132,7 +132,7 @@ export default function SdksPage() {
         </div>
 
         <div className="card p-5">
-          <h2 className="font-semibold text-white mb-2">Base URL</h2>
+          <h2 className="font-semibold text-ink mb-2">Base URL</h2>
           <CodeBlock code={API_BASE} />
         </div>
       </div>

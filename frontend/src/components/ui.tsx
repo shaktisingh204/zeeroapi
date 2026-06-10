@@ -17,7 +17,7 @@ export function StatCard({
     <div className="card p-5 flex items-center justify-between">
       <div>
         <p className="text-sm text-muted">{label}</p>
-        <p className="mt-1 text-2xl font-semibold text-white">{value}</p>
+        <p className="mt-1 text-2xl font-semibold text-ink">{value}</p>
       </div>
       {icon && (
         <div
@@ -39,10 +39,10 @@ const BADGE_CLASS: Record<BadgeVariant, string> = {
   live: "bg-live/15 text-live",
   success: "bg-brand/15 text-brand",
   brand: "bg-brand/15 text-brand",
-  info: "bg-blue-500/15 text-blue-400",
-  warning: "bg-yellow-500/15 text-yellow-400",
+  info: "bg-info/15 text-info",
+  warning: "bg-warn/15 text-warn",
   danger: "bg-live/15 text-live",
-  purple: "bg-purple-500/15 text-purple-400",
+  purple: "bg-violet2/15 text-violet2",
   neutral: "bg-surface-2 text-muted",
 };
 
@@ -108,7 +108,7 @@ export function SectionCard({
   return (
     <div className={`card p-5 ${className}`}>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="font-semibold text-white">{title}</h2>
+        <h2 className="font-semibold text-ink">{title}</h2>
         {actions}
       </div>
       {children}
@@ -135,7 +135,7 @@ export function EmptyState({
   return (
     <div className="py-16 flex flex-col items-center text-center">
       {icon && <div className="h-12 w-12 rounded-xl bg-surface-2 flex items-center justify-center text-muted mb-3">{icon}</div>}
-      {title && <p className="text-white font-medium">{title}</p>}
+      {title && <p className="text-ink font-medium">{title}</p>}
       {message && <p className="text-sm text-muted mt-1 max-w-[42ch]">{message}</p>}
       {action && <div className="mt-4">{action}</div>}
     </div>
@@ -154,7 +154,7 @@ export function PageHeader({
   return (
     <div className="flex flex-wrap items-end justify-between gap-3 mb-6">
       <div>
-        <h1 className="text-2xl font-semibold text-white">{title}</h1>
+        <h1 className="text-2xl font-semibold text-ink">{title}</h1>
         {subtitle && <p className="text-sm text-muted mt-1">{subtitle}</p>}
       </div>
       {actions && <div className="flex items-center gap-2">{actions}</div>}

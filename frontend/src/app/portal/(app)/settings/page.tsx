@@ -102,7 +102,7 @@ export default function PortalSettingsPage() {
       <PageHeader title="Settings" subtitle="Manage your ZeroApi account" />
 
       {success && (
-        <div className="card px-4 py-3 mb-4 text-sm text-white">{success}</div>
+        <div className="card px-4 py-3 mb-4 text-sm text-ink">{success}</div>
       )}
       {error && (
         <div className="rounded-lg bg-live/15 text-live text-sm px-3 py-2 mb-4">
@@ -111,22 +111,22 @@ export default function PortalSettingsPage() {
       )}
 
       <div className="card p-5 mb-6">
-        <h2 className="font-semibold text-white mb-4">Profile</h2>
+        <h2 className="font-semibold text-ink mb-4">Profile</h2>
 
         <div className="mb-5">
-          <label className="block text-sm text-white font-medium mb-1">Email</label>
+          <label className="block text-sm text-ink font-medium mb-1">Email</label>
           <p className="text-sm text-muted">{me.customer.email}</p>
           <p className="text-xs text-muted mt-1">Email cannot be changed</p>
         </div>
 
         <div className="mb-5">
-          <label className="block text-sm text-white font-medium mb-2">Plan</label>
+          <label className="block text-sm text-ink font-medium mb-2">Plan</label>
           <span className="badge bg-brand/15 text-brand">{me.plan.name}</span>
         </div>
 
         <div className="flex flex-wrap items-end gap-3">
           <div className="flex-1 min-w-[260px]">
-            <label className="block text-sm text-white font-medium mb-2">
+            <label className="block text-sm text-ink font-medium mb-2">
               Display name
             </label>
             <input
@@ -146,10 +146,10 @@ export default function PortalSettingsPage() {
       </div>
 
       <div className="card p-5 mb-6">
-        <h2 className="font-semibold text-white mb-4">Password</h2>
+        <h2 className="font-semibold text-ink mb-4">Password</h2>
 
         <div className="mb-4">
-          <label className="block text-sm text-white font-medium mb-2">
+          <label className="block text-sm text-ink font-medium mb-2">
             New password
           </label>
           <input
@@ -161,7 +161,7 @@ export default function PortalSettingsPage() {
         </div>
 
         <div className="mb-4">
-          <label className="block text-sm text-white font-medium mb-2">
+          <label className="block text-sm text-ink font-medium mb-2">
             Confirm password
           </label>
           <input
@@ -186,13 +186,13 @@ export default function PortalSettingsPage() {
       </div>
 
       <div className="card p-5 mb-6">
-        <h2 className="font-semibold text-white mb-1">Usage alerts</h2>
+        <h2 className="font-semibold text-ink mb-1">Usage alerts</h2>
         <p className="text-sm text-muted mb-4">
           Show a warning banner when you cross this percentage of your monthly quota.
         </p>
         <div className="flex flex-wrap items-end gap-3">
           <div className="flex-1 min-w-[260px]">
-            <label className="block text-sm text-white font-medium mb-2">
+            <label className="block text-sm text-ink font-medium mb-2">
               Alert at {threshold}% of quota
             </label>
             <input
@@ -216,7 +216,7 @@ export default function PortalSettingsPage() {
       </div>
 
       <div className="card p-5">
-        <h2 className="font-semibold text-white mb-1">Danger zone</h2>
+        <h2 className="font-semibold text-ink mb-1">Danger zone</h2>
         <p className="text-sm text-muted mb-4">
           Sign out of your ZeroApi account on this device.
         </p>

@@ -67,7 +67,7 @@ export default function BillingPage() {
         <PageHeader title="Billing" subtitle="Manage your subscription and payment method" />
         <div className="card p-8 text-center">
           <CreditCard size={28} className="mx-auto text-muted mb-3" />
-          <p className="text-white font-medium mb-1">Billing isn&apos;t configured yet</p>
+          <p className="text-ink font-medium mb-1">Billing isn&apos;t configured yet</p>
           <p className="text-sm text-muted">
             Stripe keys haven&apos;t been set on this environment. Plans can still be changed from the
             Overview tab.
@@ -95,24 +95,24 @@ export default function BillingPage() {
       {error && <div className="rounded-lg bg-live/15 text-live text-sm px-3 py-2 mb-4">{error}</div>}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
-        <StatCard label="Current plan" value={plan.name} accent="#22c55e" />
+        <StatCard label="Current plan" value={plan.name} accent="#059669" />
         <StatCard label="Status" value={summary.subscription_status ?? "-"} accent="#3b82f6" />
         <StatCard
           label="Usage this period"
           value={`${summary.used_this_month.toLocaleString()}${unlimited ? "" : ` / ${summary.monthly_quota.toLocaleString()}`}`}
-          accent="#f59e0b"
+          accent="#d97706"
         />
         <StatCard label="Est. cost" value={money(summary.estimated_cost_cents)} accent="#a855f7" />
       </div>
 
       {summary.overage > 0 && (
-        <div className="rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-300 text-sm px-4 py-3 mb-6">
+        <div className="rounded-lg bg-warn/10 border border-warn/30 text-warn text-sm px-4 py-3 mb-6">
           You&apos;re <strong>{summary.overage.toLocaleString()}</strong> requests over your included quota.
           Overage is metered and billed at the end of the period.
         </div>
       )}
 
-      <h2 className="font-semibold text-white mb-3">Plans</h2>
+      <h2 className="font-semibold text-ink mb-3">Plans</h2>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {plans.map((p) => {
           const current = p.slug === plan.slug;
@@ -122,10 +122,10 @@ export default function BillingPage() {
               className={`card p-5 flex flex-col ${current ? "border-brand" : ""}`}
             >
               <div className="flex items-baseline justify-between">
-                <h3 className="font-semibold text-white">{p.name}</h3>
+                <h3 className="font-semibold text-ink">{p.name}</h3>
                 {current && <span className="badge bg-brand/15 text-brand">Current</span>}
               </div>
-              <p className="text-2xl font-semibold text-white mt-2">
+              <p className="text-2xl font-semibold text-ink mt-2">
                 {money(p.price_cents)}
                 <span className="text-sm text-muted font-normal">/mo</span>
               </p>
@@ -152,7 +152,7 @@ export default function BillingPage() {
 
       {invoices.length > 0 && (
         <>
-          <h2 className="font-semibold text-white mt-8 mb-3">Invoices</h2>
+          <h2 className="font-semibold text-ink mt-8 mb-3">Invoices</h2>
           <div className="card overflow-hidden">
             <table className="w-full">
               <thead>

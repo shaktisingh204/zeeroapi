@@ -20,16 +20,17 @@ import type { EndpointStat, StatusStat, LatencyPoint } from "@/lib/types";
 import { PageHeader, StatCard, Spinner, EmptyState } from "@/components/ui";
 
 const TOOLTIP = {
-  background: "#1c2230",
-  border: "1px solid #262d3d",
+  background: "#ffffff",
+  border: "1px solid #e3e8ee",
   borderRadius: 8,
-  color: "#fff",
+  color: "#1a2333",
+  boxShadow: "0 8px 24px -12px rgba(16,24,40,0.18)",
 } as const;
 
 const STATUS_META: Record<number, { label: string; color: string }> = {
-  2: { label: "2xx success", color: "#34d27b" },
-  4: { label: "4xx client", color: "#f59e0b" },
-  5: { label: "5xx server", color: "#ef4444" },
+  2: { label: "2xx success", color: "#059669" },
+  4: { label: "4xx client", color: "#d97706" },
+  5: { label: "5xx server", color: "#dc2626" },
 };
 
 const WINDOWS = [7, 14, 30, 90];
@@ -99,7 +100,7 @@ export default function AnalyticsPage() {
                 key={w}
                 onClick={() => setDays(w)}
                 className={`px-3 py-1.5 text-xs rounded-md transition-colors ${
-                  days === w ? "bg-brand text-black font-medium" : "text-muted hover:text-white"
+                  days === w ? "bg-brand text-brand-contrast font-medium" : "text-muted hover:text-ink"
                 }`}
               >
                 {w}d
@@ -117,7 +118,7 @@ export default function AnalyticsPage() {
           <div className="flex items-center justify-between mb-3">
             <div>
               <p className="text-sm text-muted">This month on {me.plan.name}</p>
-              <p className="text-2xl font-semibold text-white">
+              <p className="text-2xl font-semibold text-ink">
                 {usage.used_this_month.toLocaleString()}
                 <span className="text-base text-muted font-normal">
                   {" "}/ {quotaUnlimited ? "∞" : usage.monthly_quota.toLocaleString()} requests
@@ -125,7 +126,7 @@ export default function AnalyticsPage() {
               </p>
             </div>
             {!quotaUnlimited && (
-              <span className={`text-sm font-medium ${overThreshold ? "text-yellow-400" : "text-muted"}`}>
+              <span className={`text-sm font-medium ${overThreshold ? "text-warn" : "text-muted"}`}>
                 {Math.round(quotaPct)}% used
               </span>
             )}
@@ -133,13 +134,13 @@ export default function AnalyticsPage() {
           {!quotaUnlimited && (
             <div className="h-2 w-full rounded-full bg-surface-2 overflow-hidden">
               <div
-                className={`h-full rounded-full ${overThreshold ? "bg-yellow-400" : "bg-brand"}`}
+                className={`h-full rounded-full ${overThreshold ? "bg-warn" : "bg-brand"}`}
                 style={{ width: `${quotaPct}%` }}
               />
             </div>
           )}
           {overThreshold && (
-            <p className="text-sm text-yellow-300 mt-3">
+            <p className="text-sm text-warn mt-3">
               You&apos;ve used {Math.round(quotaPct)}% of your quota (alert at {threshold}%). Consider
               upgrading on the <a href="/portal/billing" className="underline">Billing</a> tab.
             </p>
@@ -155,26 +156,26 @@ export default function AnalyticsPage() {
         <>
           <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
             <StatCard label="Requests" value={totalReq.toLocaleString()} accent="#3b82f6" />
-            <StatCard label="Error rate" value={`${errRate}%`} accent={Number(errRate) > 5 ? "#ef4444" : "#34d27b"} />
-            <StatCard label="Avg latency" value={`${avgLatency} ms`} accent="#f59e0b" />
+            <StatCard label="Error rate" value={`${errRate}%`} accent={Number(errRate) > 5 ? "#dc2626" : "#059669"} />
+            <StatCard label="Avg latency" value={`${avgLatency} ms`} accent="#d97706" />
             <StatCard label="Top endpoint" value={topEndpoint ? `${topEndpoint.endpoint || "none"}` : "none"} accent="#a855f7" />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <div className="card p-5 lg:col-span-2">
-              <h2 className="font-semibold text-white mb-4">Requests by endpoint</h2>
+              <h2 className="font-semibold text-ink mb-4">Requests by endpoint</h2>
               <ResponsiveContainer width="100%" height={320}>
                 <BarChart data={barData} layout="vertical" margin={{ left: 40 }}>
-                  <XAxis type="number" tick={{ fill: "#8b93a7", fontSize: 11 }} />
-                  <YAxis type="category" dataKey="name" width={120} tick={{ fill: "#8b93a7", fontSize: 11 }} />
-                  <Tooltip contentStyle={TOOLTIP} cursor={{ fill: "#ffffff08" }} />
+                  <XAxis type="number" tick={{ fill: "#5b6b80", fontSize: 11 }} />
+                  <YAxis type="category" dataKey="name" width={120} tick={{ fill: "#5b6b80", fontSize: 11 }} />
+                  <Tooltip contentStyle={TOOLTIP} cursor={{ fill: "rgba(16,24,40,0.04)" }} />
                   <Bar dataKey="count" fill="#3b82f6" radius={[0, 4, 4, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
 
             <div className="card p-5">
-              <h2 className="font-semibold text-white mb-4">Status codes</h2>
+              <h2 className="font-semibold text-ink mb-4">Status codes</h2>
               <ResponsiveContainer width="100%" height={220}>
                 <PieChart>
                   <Pie
@@ -199,7 +200,7 @@ export default function AnalyticsPage() {
                       <span className="h-2.5 w-2.5 rounded-full" style={{ background: STATUS_META[s.status_class]?.color ?? "#64748b" }} />
                       {STATUS_META[s.status_class]?.label ?? `${s.status_class}xx`}
                     </span>
-                    <span className="text-white">{s.count.toLocaleString()}</span>
+                    <span className="text-ink">{s.count.toLocaleString()}</span>
                   </div>
                 ))}
               </div>
@@ -207,13 +208,13 @@ export default function AnalyticsPage() {
           </div>
 
           <div className="card p-5 mt-4">
-            <h2 className="font-semibold text-white mb-4">Latency (daily mean, ms)</h2>
+            <h2 className="font-semibold text-ink mb-4">Latency (daily mean, ms)</h2>
             <ResponsiveContainer width="100%" height={260}>
               <LineChart data={latency} margin={{ left: -10 }}>
-                <XAxis dataKey="day" tick={{ fill: "#8b93a7", fontSize: 11 }} />
-                <YAxis tick={{ fill: "#8b93a7", fontSize: 11 }} />
-                <Tooltip contentStyle={TOOLTIP} cursor={{ stroke: "#ffffff20" }} />
-                <Line type="monotone" dataKey="avg_latency_ms" stroke="#f59e0b" strokeWidth={2} dot={false} />
+                <XAxis dataKey="day" tick={{ fill: "#5b6b80", fontSize: 11 }} />
+                <YAxis tick={{ fill: "#5b6b80", fontSize: 11 }} />
+                <Tooltip contentStyle={TOOLTIP} cursor={{ stroke: "rgba(16,24,40,0.18)" }} />
+                <Line type="monotone" dataKey="avg_latency_ms" stroke="#d97706" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>
           </div>

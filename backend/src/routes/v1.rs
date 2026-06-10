@@ -197,7 +197,7 @@ pub(crate) async fn matches_core(state: &AppState, client: &ApiClient, provider:
     let search = q.search.map(|s| format!("%{}%", s.to_lowercase()));
     let sql = format!(
         "{MATCH_SELECT}
-         WHERE m.provider = $1
+         WHERE m.provider = $1 AND m.dead = false
            AND ($2::text IS NULL OR m.status = $2)
            AND ($3::bigint IS NULL OR m.sport_id = $3)
            AND ($4::bigint IS NULL OR m.league_id = $4)
@@ -221,7 +221,7 @@ pub(crate) async fn matches_core(state: &AppState, client: &ApiClient, provider:
 pub(crate) async fn match_detail_core(state: &AppState, client: &ApiClient, provider: &str, id: i64)
     -> AppResult<(HeaderMap, Json<Value>)> {
     require_capability(state, provider, "matches").await?;
-    let sql = format!("{MATCH_SELECT} WHERE m.provider = $1 AND m.id = $2");
+    let sql = format!("{MATCH_SELECT} WHERE m.provider = $1 AND m.id = $2 AND m.dead = false");
     let m: Option<MatchView> = sqlx::query_as(&sql)
         .bind(provider)
         .bind(id)
@@ -242,7 +242,7 @@ pub(crate) async fn live_core(state: &AppState, client: &ApiClient, provider: &s
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     require_capability(state, provider, "live").await?;
     let sql = format!(
-        "{MATCH_SELECT} WHERE m.provider = $1 AND m.status = 'live' ORDER BY m.updated_at DESC LIMIT 500"
+        "{MATCH_SELECT} WHERE m.provider = $1 AND m.dead = false AND m.status = 'live' ORDER BY m.updated_at DESC LIMIT 500"
     );
     let rows: Vec<MatchView> = sqlx::query_as(&sql)
         .bind(provider)
@@ -256,7 +256,7 @@ pub(crate) async fn featured_core(state: &AppState, client: &ApiClient, provider
     require_capability(state, provider, "matches").await?;
     // Promoted events that are still relevant (not finished), live first.
     let sql = format!(
-        "{MATCH_SELECT} WHERE m.provider = $1 AND m.featured = true AND m.status <> 'finished'
+        "{MATCH_SELECT} WHERE m.provider = $1 AND m.dead = false AND m.featured = true AND m.status <> 'finished'
          ORDER BY (m.status = 'live') DESC, m.updated_at DESC LIMIT 100"
     );
     let rows: Vec<MatchView> = sqlx::query_as(&sql)
@@ -270,7 +270,7 @@ pub(crate) async fn header_matches_core(state: &AppState, client: &ApiClient, pr
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     require_capability(state, provider, "matches").await?;
     let sql = format!(
-        "{MATCH_SELECT} WHERE m.provider = $1 AND m.header = true AND m.status <> 'finished'
+        "{MATCH_SELECT} WHERE m.provider = $1 AND m.dead = false AND m.header = true AND m.status <> 'finished'
          ORDER BY (m.status = 'live') DESC, m.start_time ASC NULLS LAST LIMIT 200"
     );
     let rows: Vec<MatchView> = sqlx::query_as(&sql)
@@ -299,7 +299,7 @@ pub(crate) async fn match_odds_core(state: &AppState, client: &ApiClient, provid
     require_capability(state, provider, "odds").await?;
     let odds: Vec<Odd> = sqlx::query_as(
         "SELECT o.* FROM odds o JOIN matches m ON m.id = o.match_id
-         WHERE o.match_id = $1 AND m.provider = $2 ORDER BY o.market, o.outcome",
+         WHERE o.match_id = $1 AND m.provider = $2 AND m.dead = false ORDER BY o.market, o.outcome",
     )
     .bind(match_id)
     .bind(provider)
@@ -314,7 +314,7 @@ pub(crate) async fn markets_core(state: &AppState, client: &ApiClient, provider:
     require_capability(state, provider, "odds").await?;
     let odds: Vec<Odd> = sqlx::query_as(
         "SELECT o.* FROM odds o JOIN matches m ON m.id = o.match_id
-         WHERE o.match_id = $1 AND m.provider = $2 ORDER BY o.market, o.outcome",
+         WHERE o.match_id = $1 AND m.provider = $2 AND m.dead = false ORDER BY o.market, o.outcome",
     )
     .bind(match_id)
     .bind(provider)
@@ -351,7 +351,7 @@ pub(crate) async fn prematch_core(state: &AppState, client: &ApiClient, provider
     -> AppResult<(HeaderMap, Json<Vec<MatchView>>)> {
     require_capability(state, provider, "matches").await?;
     let sql = format!(
-        "{MATCH_SELECT} WHERE m.provider = $1 AND m.status = 'prematch'
+        "{MATCH_SELECT} WHERE m.provider = $1 AND m.dead = false AND m.status = 'prematch'
          ORDER BY m.start_time ASC NULLS LAST LIMIT 500"
     );
     let rows: Vec<MatchView> = sqlx::query_as(&sql).bind(provider).fetch_all(&state.pool).await?;
