@@ -118,10 +118,12 @@ module.exports = {
     scraper('scrape_megapari', 'scrape_megapari.py', 30),
     scraper('scrape_1win', 'scrape_1win.py', 20),
     // d247: force the Playwright engine (auth proxy support) and inject the
-    // residential proxy when D247_PROXY is set in backend/.env.
-    scraper('scrape_d247', 'scrape_d247.py', 150, {
+    // residential proxy when D247_PROXY is set in backend/.env. Runs a pool of
+    // parallel worker pages (D247_WORKERS) so a full odds refresh completes fast
+    // and lands in the API near real-time; the tight loop runs passes back-to-back.
+    scraper('scrape_d247', 'scrape_d247.py', 20, {
       engine: 'playwright',
-      env: D247_PROXY ? { D247_PROXY } : {},
+      env: { D247_WORKERS: '4', ...(D247_PROXY ? { D247_PROXY } : {}) },
     }),
     scraper('scrape_bcgame', 'scrape_bcgame.py', 30),
   ],

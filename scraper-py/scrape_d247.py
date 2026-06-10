@@ -253,6 +253,14 @@ SEPARATORS = [" v ", " vs ", " @ ", " - "]
 # How many live matches to enrich with full detail-page markets per pass.
 DETAIL_CAP = int(os.environ.get("D247_DETAIL_CAP", "25"))
 
+# Number of parallel worker PAGES (tabs in the same logged-in browser context)
+# used to sweep sports / enrich details concurrently. Real concurrency: each page
+# scrapes a different sport at the same time, so a full refresh — and therefore
+# the odds reaching the API — completes ~N× faster (near-real-time). 1 = the old
+# sequential single-page behavior. Tunable via D247_WORKERS (default 4); the pool
+# shares one Cloudflare session, so keep it modest.
+D247_WORKERS = max(1, int(os.environ.get("D247_WORKERS", "4")))
+
 # Grace window (seconds) before a match missing from a sweep is retired. Set
 # generously so a pass that only captured part of d247's scroll-virtualized list
 # never drops matches that are still on the site; only matches genuinely gone for
@@ -927,6 +935,136 @@ async def one_pass(client, page):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Parallel pass — a pool of worker PAGES scrape different sports concurrently.
+# ═══════════════════════════════════════════════════════════════════════════
+# Each page is an independent tab in the SAME logged-in context (shared cookies +
+# localStorage demo session). We fan the sports out across the pool with a shared
+# queue and asyncio.gather: while page A waits on a render/scroll, page B is
+# already scraping its sport. The per-sport snapshot is POSTed the instant that
+# sport is done, so fresh odds hit the API continuously through the pass instead
+# of only at the end — collapsing the odds-to-API delay toward real time.
+
+async def _drain_queue(queue, worker_label, handler):
+    """Pop (item) off `queue` and run `handler(item)` until empty. One coroutine
+    per worker page; exceptions in a handler are logged, never fatal."""
+    while True:
+        try:
+            item = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        try:
+            await handler(item)
+        except Exception as e:
+            print(f"  [{worker_label}] task error: {e}", file=sys.stderr)
+        finally:
+            queue.task_done()
+
+
+async def sweep_parallel(client, pages, labels):
+    """Phase 1, parallel: each worker page pulls sports off a shared queue and
+    sweeps them concurrently. Returns (total_matches, total_odds, live_targets)."""
+    queue = asyncio.Queue()
+    for idx, sport in enumerate(labels):
+        queue.put_nowait((idx, sport))
+
+    totals = {"m": 0, "o": 0}
+    live_targets = []  # (idx, sport, match_dict)
+    agg = asyncio.Lock()
+
+    def make_handler(page, wid):
+        async def handle(item):
+            idx, sport = item
+            m, o, live = await scrape_sport(client, page, idx, sport)
+            async with agg:
+                totals["m"] += m
+                totals["o"] += o
+                for lm in live:
+                    live_targets.append((idx, sport, lm))
+        return handle
+
+    await asyncio.gather(*(
+        _drain_queue(queue, f"w{wid}", make_handler(page, wid))
+        for wid, page in enumerate(pages)
+    ))
+    return totals["m"], totals["o"], live_targets
+
+
+async def enrich_parallel(client, pages, live_targets):
+    """Phase 2, parallel: distribute live/event detail enrichment across the page
+    pool. Each worker re-opens the sport tab on ITS page, so they don't collide."""
+    if not live_targets:
+        return 0
+    queue = asyncio.Queue()
+    for t in live_targets:
+        queue.put_nowait(t)
+
+    done = {"n": 0}
+    agg = asyncio.Lock()
+
+    def make_handler(page, wid):
+        async def handle(item):
+            idx, sport, lm = item
+            if await enrich_detail(client, page, idx, sport, lm):
+                async with agg:
+                    done["n"] += 1
+        return handle
+
+    await asyncio.gather(*(
+        _drain_queue(queue, f"w{wid}", make_handler(page, wid))
+        for wid, page in enumerate(pages)
+    ))
+    return done["n"]
+
+
+async def one_pass_parallel(client, pages):
+    """A full pass using the worker-page pool. Phase 0 stays on the primary page
+    (cheap, single-shot); Phases 1 and 2 fan out across all pages."""
+    primary = pages[0]
+    # Phase 0 — catalog/featured/header from the primary page (single source).
+    await scrape_sidebar(client, primary)
+    await scrape_featured(client, primary)
+    await scrape_header(client, primary)
+
+    labels = await tab_labels(primary)
+    if not labels:
+        print("  no sport tabs found", file=sys.stderr)
+        return 0, 0, 0
+
+    # Phase 1 — parallel list sweep across ALL sports.
+    total_m, total_o, live_targets = await sweep_parallel(client, pages, labels)
+
+    # Phase 2 — parallel detail enrichment (bounded by cap, live first).
+    targets = live_targets[:DETAIL_CAP]
+    enriched = await enrich_parallel(client, pages, targets)
+    if live_targets:
+        print(f"  detail-enriched {enriched}/{len(targets)} live matches "
+              f"(across {len(pages)} pages)")
+    return total_m, total_o, len(labels)
+
+
+async def open_worker_pages(new_page, n):
+    """Open up to n-1 EXTRA worker pages in the same context and make sure each is
+    past the login wall (they share the session cookies/localStorage, so a goto +
+    modal dismiss is usually enough; fall back to a full demo_login if not)."""
+    extra = []
+    for i in range(max(0, n - 1)):
+        try:
+            p = await new_page()
+            await p.goto(f"{SITE}/", wait_until="domcontentloaded", timeout=60000)
+            await p.wait_for_timeout(800)
+            await dismiss_modal(p)
+            if not await _is_logged_in(p):
+                await demo_login(p)
+            extra.append(p)
+            print(f"  worker page {i + 2}/{n} ready")
+        except Exception as e:
+            print(f"  worker page {i + 2}/{n} failed: {e}; continuing with fewer",
+                  file=sys.stderr)
+            break
+    return extra
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Browser engines + nodriver backend
 # ═══════════════════════════════════════════════════════════════════════════
 # We try stealth browsers in order; the first that gets past Cloudflare and logs
@@ -1219,8 +1357,10 @@ async def _nd_export_state(browser, path):
 
 
 async def open_engine(name, headless):
-    """Launch one engine. Returns (page, on_login_saved, aclose).
+    """Launch one engine. Returns (page, on_login_saved, aclose, new_page).
     `on_login_saved` is an async fn(page) to persist the session post-login.
+    `new_page` is an async fn() that opens another page in the SAME context (for
+    the parallel worker pool), or None if the engine can't (nodriver).
     Raises ModuleNotFoundError if the engine isn't installed."""
     state_kw = {}
     if os.path.exists(STATE_FILE):
@@ -1258,7 +1398,8 @@ async def open_engine(name, headless):
             except Exception:
                 pass
 
-        return page, (lambda p: _nd_export_state(browser, STATE_FILE)), aclose
+        # nodriver: no shared-context multi-page support here → sequential only.
+        return page, (lambda p: _nd_export_state(browser, STATE_FILE)), aclose, None
 
     # ---- camoufox (stealth Firefox; Playwright API) ----
     if name == "camoufox":
@@ -1285,7 +1426,11 @@ async def open_engine(name, headless):
 
         async def save(_p):
             await ctx.storage_state(path=STATE_FILE)
-        return page, save, aclose
+
+        # ctx.route already applies to every page (incl. ones opened later).
+        async def new_page():
+            return await ctx.new_page()
+        return page, save, aclose, new_page
 
     # ---- patchright / rebrowser-playwright / stock playwright (Playwright API) ----
     if name == "patchright":
@@ -1315,7 +1460,11 @@ async def open_engine(name, headless):
 
     async def save(_p):
         await ctx.storage_state(path=STATE_FILE)
-    return page, save, aclose
+
+    # ctx.route already applies to every page (incl. ones opened later).
+    async def new_page():
+        return await ctx.new_page()
+    return page, save, aclose, new_page
 
 
 async def run_engine(name, args, stop):
@@ -1324,7 +1473,7 @@ async def run_engine(name, args, stop):
     headless = not args.headed
     if os.path.exists(STATE_FILE):
         print(f"[{name}] reusing saved session: {STATE_FILE}")
-    page, save, aclose = await open_engine(name, headless)
+    page, save, aclose, new_page = await open_engine(name, headless)
     try:
         try:
             await demo_login(page)
@@ -1344,12 +1493,27 @@ async def run_engine(name, args, stop):
         except Exception as e:
             print(f"[{name}] could not save session: {e}", file=sys.stderr)
 
+        # Build the parallel worker-page pool (extra tabs in the same logged-in
+        # context). Each scrapes a different sport concurrently → odds reach the
+        # API ~Nx faster. Falls back to a single page if the engine can't spawn
+        # pages (nodriver) or D247_WORKERS=1.
+        pages = [page]
+        if D247_WORKERS > 1 and new_page is not None:
+            pages.extend(await open_worker_pages(new_page, D247_WORKERS))
+        if len(pages) > 1:
+            print(f"[{name}] parallel mode: {len(pages)} worker pages")
+        else:
+            print(f"[{name}] sequential mode (1 page)")
+
         async with httpx.AsyncClient() as client:
             n = 0
             while not stop.is_set():
                 t0 = time.monotonic()
                 n += 1
-                tm, to, nsports = await one_pass(client, page)
+                if len(pages) > 1:
+                    tm, to, nsports = await one_pass_parallel(client, pages)
+                else:
+                    tm, to, nsports = await one_pass(client, page)
                 dt = (time.monotonic() - t0) * 1000
                 print(f"[{name}] pass {n}: {tm} matches, {to} odds across {nsports} sports in {dt:.0f}ms\n")
                 if args.loop <= 0:

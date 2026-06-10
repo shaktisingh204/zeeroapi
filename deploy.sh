@@ -511,7 +511,7 @@ start_with_nohup() {
     start_bg scrape_betwinner "$LOG_DIR/scrape_betwinner.log" "$SCRAPER_DIR" "$PY" scrape_betwinner.py --loop 30
     start_bg scrape_megapari  "$LOG_DIR/scrape_megapari.log"  "$SCRAPER_DIR" "$PY" scrape_megapari.py  --loop 30
     start_bg scrape_1win      "$LOG_DIR/scrape_1win.log"      "$SCRAPER_DIR" "$PY" scrape_1win.py      --loop 20
-    start_bg scrape_d247      "$LOG_DIR/scrape_d247.log"      "$SCRAPER_DIR" "$PY" scrape_d247.py      --loop 150
+    D247_WORKERS=4 start_bg scrape_d247 "$LOG_DIR/scrape_d247.log" "$SCRAPER_DIR" "$PY" scrape_d247.py --loop 20
     start_bg scrape_bcgame    "$LOG_DIR/scrape_bcgame.log"    "$SCRAPER_DIR" "$PY" scrape_bcgame.py    --loop 30
     warn "melbet is auto-supervised by the backend (toggle page_sync_enabled in the admin Settings tab)"
   fi
